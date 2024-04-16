@@ -91,7 +91,6 @@ type TransactionEvent struct {
 	Payload   TransactionPayload `json:"payload"`
 }
 
-
 // Indexer struct to manage the Snek pipeline and block events
 type Indexer struct {
 	pipeline         *pipeline.Pipeline
@@ -150,15 +149,19 @@ func (i *Indexer) Start() error {
 	i.telegramChannel = viper.GetString("telegram.channel")
 	i.telegramToken = viper.GetString("telegram.token")
 
-	// Store the node addresses hosts into the array nodeAddresses in the Indexer
-	i.nodeAddresses = viper.GetStringSlice("nodeAddress.host1")
-	i.nodeAddresses = append(i.nodeAddresses, viper.GetStringSlice("nodeAddress.host2")...)
-
-	// Initialize the bot
-	var err error
-
+	// Parse telegram channel ID
+	channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
 	if err != nil {
 		log.Fatalf("failed to parse telegram channel ID: %s", err)
+	}
+
+	// Initialize the bot
+	i.bot, err = telebot.NewBot(telebot.Settings{
+		Token:  i.telegramToken,
+		Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
+	})
+	if err != nil {
+		log.Fatalf("failed to start bot: %s", err)
 	}
 
 	i.bot, err = telebot.NewBot(telebot.Settings{
@@ -219,11 +222,6 @@ func (i *Indexer) Start() error {
 		i.poolName = *poolInfo.Data.MetaJSON.Name
 	} else {
 		i.poolName = ""
-	}
-
-	channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
-	if err != nil {
-		log.Fatalf("failed to parse telegram channel ID: %s", err)
 	}
 
 	initMessage := fmt.Sprintf("duckBot initiated!\n\n %s\n Epoch: %d\n Lifetime Blocks: %d\n\n Quack Will Robinson, QUACK!",
