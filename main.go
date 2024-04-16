@@ -94,22 +94,24 @@ type TransactionEvent struct {
 
 // Indexer struct to manage the Snek pipeline and block events
 type Indexer struct {
-	pipeline         *pipeline.Pipeline
-	blockEvent       BlockEvent
-	bot              *telebot.Bot
-	transactionEvent TransactionEvent
-	rollbackEvent    RollbackEvent
-	nodeAddresses    []string
-	poolId           string
-	telegramChannel  string
-	telegramToken    string
-	ticker           string
-	bech32PoolId     string
-	koios            *koios.Client
-	totalBlocks      uint64
-	poolName         string
-	wg               sync.WaitGroup
+    pipeline         *pipeline.Pipeline
+    blockEvent       BlockEvent
+    bot              *telebot.Bot
+    transactionEvent TransactionEvent
+    rollbackEvent    RollbackEvent
+    nodeAddresses    []string
+    poolId           string
+    telegramChannel  string
+    telegramToken    string
+    ticker           string
+    bech32PoolId     string
+    koios            *koios.Client
+    totalBlocks      uint64
+    poolName         string
+    wg               sync.WaitGroup
+    networkMagic     int // Add networkMagic field
 }
+
 
 // TwitterCredentials represents the Twitter API credentials
 type TwitterCredentials struct {
@@ -122,171 +124,170 @@ type TwitterCredentials struct {
 // Singleton instance of the Indexer
 var globalIndexer = &Indexer{}
 
-// Start the Snek pipeline and handle block events
 func (i *Indexer) Start() error {
-	// Increment the WaitGroup counter
-	i.wg.Add(1)
+    // Increment the WaitGroup counter
+    i.wg.Add(1)
 
-	defer func() {
-		// Decrement the WaitGroup counter when the function exits
-		i.wg.Done()
+    defer func() {
+        // Decrement the WaitGroup counter when the function exits
+        i.wg.Done()
 
-		if r := recover(); r != nil {
-			log.Println("Recovered in handleEvent", r)
-		}
-	}()
+        if r := recover(); r != nil {
+            log.Println("Recovered in handleEvent", r)
+        }
+    }()
 
-	viper.SetConfigName("config") // name of config file (without extension)
-	viper.AddConfigPath(".")      // look for config in the working directory
+    viper.SetConfigName("config") // name of config file (without extension)
+    viper.AddConfigPath(".")      // look for config in the working directory
 
-	e := viper.ReadInConfig() // Find and read the config file
-	if e != nil {             // Handle errors reading the config file
-		log.Fatalf("Error while reading config file %s", e)
+    e := viper.ReadInConfig() // Find and read the config file
+    if e != nil {             // Handle errors reading the config file
+        log.Fatalf("Error while reading config file %s", e)
 
-	}
+    }
 
-	// Set the configuration values
-	i.poolId = viper.GetString("poolId")
-	i.telegramChannel = viper.GetString("telegram.channel")
-	i.telegramToken = viper.GetString("telegram.token")
+    // Set the configuration values
+    i.poolId = viper.GetString("poolId")
+    i.telegramChannel = viper.GetString("telegram.channel")
+    i.telegramToken = viper.GetString("telegram.token")
+    i.networkMagic = viper.GetInt("networkMagic") // Read networkMagic from config file
 
-	// Store the node addresses hosts into the array nodeAddresses in the Indexer
-	i.nodeAddresses = viper.GetStringSlice("nodeAddress.host1")
-	i.nodeAddresses = append(i.nodeAddresses, viper.GetStringSlice("nodeAddress.host2")...)
+    // Store the node addresses hosts into the array nodeAddresses in the Indexer
+    i.nodeAddresses = viper.GetStringSlice("nodeAddress.host1")
+    i.nodeAddresses = append(i.nodeAddresses, viper.GetStringSlice("nodeAddress.host2")...)
 
-	// Initialize the bot
-	var err error
+    // Initialize the bot
+    var err error
 
-	if err != nil {
-		log.Fatalf("failed to parse telegram channel ID: %s", err)
-	}
+    if err != nil {
+        log.Fatalf("failed to parse telegram channel ID: %s", err)
+    }
 
-	i.bot, err = telebot.NewBot(telebot.Settings{
-		Token:  i.telegramToken,
-		Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
-	})
+    i.bot, err = telebot.NewBot(telebot.Settings{
+        Token:  i.telegramToken,
+        Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
+    })
 
-	if err != nil {
-		log.Fatalf("failed to start bot: %s", err)
-	}
+    if err != nil {
+        log.Fatalf("failed to start bot: %s", err)
+    }
 
-	/// Initialize the kois client
-	i.koios, e = koios.New()
-	if e != nil {
-		log.Fatal(e)
-	}
+    // Initialize the kois client
+    i.koios, e = koios.New()
+    if e != nil {
+        log.Fatal(e)
+    }
 
-	// Get the current epoch
-	epochInfo, err := i.koios.GetTip(context.Background(), nil)
-	if err != nil {
-		log.Fatalf("failed to get epoch info: %s", err)
-	}
+    // Get the current epoch
+    epochInfo, err := i.koios.GetTip(context.Background(), nil)
+    if err != nil {
+        log.Fatalf("failed to get epoch info: %s", err)
+    }
 
-	fmt.Println("Epoch: ", epochInfo.Data.EpochNo)
+    fmt.Println("Epoch: ", epochInfo.Data.EpochNo)
 
-	// Convert the poolId to Bech32
-	bech32PoolId, err := convertToBech32(i.poolId)
-	if err != nil {
-		log.Printf("failed to convert pool id to Bech32: %s", err)
-		fmt.Println("PoolId: ", bech32PoolId)
-	}
+    // Convert the poolId to Bech32
+    bech32PoolId, err := convertToBech32(i.poolId)
+    if err != nil {
+        log.Printf("failed to convert pool id to Bech32: %s", err)
+        fmt.Println("PoolId: ", bech32PoolId)
+    }
 
-	// Set the bech32PoolId field in the Indexer
-	i.bech32PoolId = bech32PoolId
+    // Set the bech32PoolId field in the Indexer
+    i.bech32PoolId = bech32PoolId
 
-	// Get pool info
-	poolInfo, err := i.koios.GetPoolInfo(context.Background(), koios.PoolID(i.bech32PoolId), nil)
-	if err != nil {
-		log.Fatalf("failed to get pool lifetime blocks: %s", err)
-	}
+    // Get pool info
+    poolInfo, err := i.koios.GetPoolInfo(context.Background(), koios.PoolID(i.bech32PoolId), nil)
+    if err != nil {
+        log.Fatalf("failed to get pool lifetime blocks: %s", err)
+    }
 
-	if poolInfo.Data != nil {
-		i.totalBlocks = poolInfo.Data.BlockCount
-		fmt.Println("Total Blocks: ", i.totalBlocks)
-	} else {
-		log.Fatalf("failed to get pool lifetime blocks: %s", err)
-	}
+    if poolInfo.Data != nil {
+        i.totalBlocks = poolInfo.Data.BlockCount
+        fmt.Println("Total Blocks: ", i.totalBlocks)
+    } else {
+        log.Fatalf("failed to get pool lifetime blocks: %s", err)
+    }
 
-	// Get pool ticker
-	if poolInfo.Data.MetaJSON.Ticker != nil {
-		i.ticker = *poolInfo.Data.MetaJSON.Ticker
-	} else {
-		i.ticker = ""
-	}
+    // Get pool ticker
+    if poolInfo.Data.MetaJSON.Ticker != nil {
+        i.ticker = *poolInfo.Data.MetaJSON.Ticker
+    } else {
+        i.ticker = ""
+    }
 
-	// Get pool name
-	if poolInfo.Data.MetaJSON.Name != nil {
-		i.poolName = *poolInfo.Data.MetaJSON.Name
-	} else {
-		i.poolName = ""
-	}
+    // Get pool name
+    if poolInfo.Data.MetaJSON.Name != nil {
+        i.poolName = *poolInfo.Data.MetaJSON.Name
+    } else {
+        i.poolName = ""
+    }
 
-	channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
-	if err != nil {
-		log.Fatalf("failed to parse telegram channel ID: %s", err)
-	}
+    channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
+    if err != nil {
+        log.Fatalf("failed to parse telegram channel ID: %s", err)
+    }
 
-	initMessage := fmt.Sprintf("duckBot initiated!\n\n %s\n Epoch: %d\n Lifetime Blocks: %d\n\n Quack Will Robinson, QUACK!",
-		i.poolName, epochInfo.Data.EpochNo, i.totalBlocks)
+    initMessage := fmt.Sprintf("duckBot initiated!\n\n %s\n Epoch: %d\n Lifetime Blocks: %d\n\n Quack Will Robinson, QUACK!",
+        i.poolName, epochInfo.Data.EpochNo, i.totalBlocks)
 
-	_, err = i.bot.Send(&telebot.Chat{ID: channelID}, initMessage)
-	if err != nil {
-		log.Printf("failed to send Telegram message: %s", err)
-	}
+    _, err = i.bot.Send(&telebot.Chat{ID: channelID}, initMessage)
+    if err != nil {
+        log.Printf("failed to send Telegram message: %s", err)
+    }
 
-	const maxRetries = 3
+    const maxRetries = 3
 
-	// Wrap the pipeline start in a function for the backoff operation
-	startPipelineFunc := func(host string) error {
-		// Use the host to connect to the Cardano node
-		node := chainsync.WithAddress(host)
-		inputOpts := []chainsync.ChainSyncOptionFunc{
-			node,
-			chainsync.WithNetworkMagic(764824073),
-			chainsync.WithIntersectTip(true),
-			chainsync.WithAutoReconnect(true),
-		}
+    // Wrap the pipeline start in a function for the backoff operation
+    startPipelineFunc := func(host string) error {
+        // Use the host to connect to the Cardano node
+        node := chainsync.WithAddress(host)
+        inputOpts := []chainsync.ChainSyncOptionFunc{
+            node,
+            chainsync.WithNetworkMagic(uint32(i.networkMagic)), // Convert networkMagic to uint32
+            chainsync.WithIntersectTip(true),
+            chainsync.WithAutoReconnect(true),
+        }
 
-		i.pipeline = pipeline.New()
+        i.pipeline = pipeline.New()
 
-		// Configure ChainSync input
-		input_chainsync := chainsync.New(inputOpts...)
-		i.pipeline.AddInput(input_chainsync)
+        // Configure ChainSync input
+        input_chainsync := chainsync.New(inputOpts...)
+        i.pipeline.AddInput(input_chainsync)
 
-		// Configure filter to handle events
-		filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block", "chainsync.rollback"}))
-		i.pipeline.AddFilter(filterEvent)
+        // Configure filter to handle events
+        filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block", "chainsync.rollback"}))
+        i.pipeline.AddFilter(filterEvent)
 
-		// Configure embedded output with callback function
-		output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
-		i.pipeline.AddOutput(output)
+        // Configure embedded output with callback function
+        output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
+        i.pipeline.AddOutput(output)
 
-		err := i.pipeline.Start()
-		if err != nil {
-			log.Printf("Failed to start pipeline: %s. Retrying...", err)
-			return err
-		}
-		return nil
-	}
+        err := i.pipeline.Start()
+        if err != nil {
+            log.Printf("Failed to start pipeline: %s. Retrying...", err)
+            return err
+        }
+        return nil
+    }
 
-	// Initialize the backoff strategy
-	bo := backoff.NewExponentialBackOff()
-	bo.MaxElapsedTime = time.Minute // Max duration to keep retrying
+    // Initialize the backoff strategy
+    bo := backoff.NewExponentialBackOff()
+    bo.MaxElapsedTime = time.Minute // Max duration to keep retrying
 
-	hosts := i.nodeAddresses
-	for _, host := range hosts {
-		for i := 0; i < maxRetries; i++ {
-			err := startPipelineFunc(host)
-			if err == nil {
-				return nil
-			}
-			time.Sleep(time.Duration(i) * time.Second)
-		}
-	}
+    hosts := i.nodeAddresses
+    for _, host := range hosts {
+        for i := 0; i < maxRetries; i++ {
+            err := startPipelineFunc(host)
+            if err == nil {
+                return nil
+            }
+            time.Sleep(time.Duration(i) * time.Second)
+        }
+    }
 
-	log.Fatalf("Failed to start pipeline after several attempts")
-	return errors.New("Failed to start pipeline after several attempts")
-
+    log.Fatalf("Failed to start pipeline after several attempts")
+    return errors.New("Failed to start pipeline after several attempts")
 }
 
 // Handle block events received from the Snek pipeline
