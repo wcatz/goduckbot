@@ -91,6 +91,7 @@ type TransactionEvent struct {
 	Payload   TransactionPayload `json:"payload"`
 }
 
+
 // Indexer struct to manage the Snek pipeline and block events
 type Indexer struct {
 	pipeline         *pipeline.Pipeline
@@ -108,7 +109,6 @@ type Indexer struct {
 	totalBlocks      uint64
 	poolName         string
 	wg               sync.WaitGroup
-	networkMagic     int // Add networkMagic field
 }
 
 // TwitterCredentials represents the Twitter API credentials
@@ -149,21 +149,16 @@ func (i *Indexer) Start() error {
 	i.poolId = viper.GetString("poolId")
 	i.telegramChannel = viper.GetString("telegram.channel")
 	i.telegramToken = viper.GetString("telegram.token")
-	i.networkMagic = viper.GetInt("networkMagic") // Read network magic from config
 
-	// Parse telegram channel ID
-	channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
-	if err != nil {
-		log.Fatalf("failed to parse telegram channel ID: %s", err)
-	}
+	// Store the node addresses hosts into the array nodeAddresses in the Indexer
+	i.nodeAddresses = viper.GetStringSlice("nodeAddress.host1")
+	i.nodeAddresses = append(i.nodeAddresses, viper.GetStringSlice("nodeAddress.host2")...)
 
 	// Initialize the bot
-	i.bot, err = telebot.NewBot(telebot.Settings{
-		Token:  i.telegramToken,
-		Poller: &telebot.LongPoller{Timeout: 10 * time.Second},
-	})
+	var err error
+
 	if err != nil {
-		log.Fatalf("failed to start bot: %s", err)
+		log.Fatalf("failed to parse telegram channel ID: %s", err)
 	}
 
 	i.bot, err = telebot.NewBot(telebot.Settings{
@@ -226,6 +221,11 @@ func (i *Indexer) Start() error {
 		i.poolName = ""
 	}
 
+	channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
+	if err != nil {
+		log.Fatalf("failed to parse telegram channel ID: %s", err)
+	}
+
 	initMessage := fmt.Sprintf("duckBot initiated!\n\n %s\n Epoch: %d\n Lifetime Blocks: %d\n\n Quack Will Robinson, QUACK!",
 		i.poolName, epochInfo.Data.EpochNo, i.totalBlocks)
 
@@ -240,13 +240,9 @@ func (i *Indexer) Start() error {
 	startPipelineFunc := func(host string) error {
 		// Use the host to connect to the Cardano node
 		node := chainsync.WithAddress(host)
-
-		// Convert networkMagic from int to uint32
-		networkMagic := uint32(i.networkMagic)
-
 		inputOpts := []chainsync.ChainSyncOptionFunc{
 			node,
-			chainsync.WithNetworkMagic(networkMagic),
+			chainsync.WithNetworkMagic(764824073),
 			chainsync.WithIntersectTip(true),
 			chainsync.WithAutoReconnect(true),
 		}
