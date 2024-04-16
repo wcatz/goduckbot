@@ -108,6 +108,7 @@ type Indexer struct {
 	totalBlocks      uint64
 	poolName         string
 	wg               sync.WaitGroup
+	networkMagic     int // Add networkMagic field
 }
 
 // TwitterCredentials represents the Twitter API credentials
@@ -148,6 +149,7 @@ func (i *Indexer) Start() error {
 	i.poolId = viper.GetString("poolId")
 	i.telegramChannel = viper.GetString("telegram.channel")
 	i.telegramToken = viper.GetString("telegram.token")
+	i.networkMagic = viper.GetInt("networkMagic") // Read network magic from config
 
 	// Parse telegram channel ID
 	channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
@@ -238,9 +240,13 @@ func (i *Indexer) Start() error {
 	startPipelineFunc := func(host string) error {
 		// Use the host to connect to the Cardano node
 		node := chainsync.WithAddress(host)
+
+		// Convert networkMagic from int to uint32
+		networkMagic := uint32(i.networkMagic)
+
 		inputOpts := []chainsync.ChainSyncOptionFunc{
 			node,
-			chainsync.WithNetworkMagic(764824073),
+			chainsync.WithNetworkMagic(networkMagic),
 			chainsync.WithIntersectTip(true),
 			chainsync.WithAutoReconnect(true),
 		}
