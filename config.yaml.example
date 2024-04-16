@@ -1,7 +1,16 @@
-telegram:
-  token: ""
-  channel: ""
+poolId: "YOUR_POOL_ID"
 nodeAddress:
-  host1: ""
-  host2: ""
-poolId: ""
+  host1: "YOUR_CARDANO_NODE_ADDRESS_1:PORT"
+  host2: "YOUR_CARDANO_NODE_ADDRESS_2:PORT"
+
+networkMagic: 764824073 #mainnet. preprod is 1, preview is 2 and sancho is 4.
+
+telegram:
+  token: "YOUR_TELEGRAM_BOT_TOKEN"
+  channel: "YOUR_TELEGRAM_CHANNEL_ID"
+
+twitter:
+  consumer_key: "YOUR_TWITTER_CONSUMER_KEY"
+  consumer_secret: "YOUR_TWITTER_CONSUMER_SECRET"
+  access_token: "YOUR_TWITTER_ACCESS_TOKEN"
+  access_token_secret: "YOUR_TWITTER_ACCESS_TOKEN_SECRET"

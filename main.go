@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/snek/event"
@@ -90,6 +91,7 @@ type TransactionEvent struct {
 	Payload   TransactionPayload `json:"payload"`
 }
 
+
 // Indexer struct to manage the Snek pipeline and block events
 type Indexer struct {
 	pipeline         *pipeline.Pipeline
@@ -106,8 +108,8 @@ type Indexer struct {
 	koios            *koios.Client
 	totalBlocks      uint64
 	poolName         string
+	wg               sync.WaitGroup
 }
-
 
 // TwitterCredentials represents the Twitter API credentials
 type TwitterCredentials struct {
@@ -122,6 +124,17 @@ var globalIndexer = &Indexer{}
 
 // Start the Snek pipeline and handle block events
 func (i *Indexer) Start() error {
+	// Increment the WaitGroup counter
+	i.wg.Add(1)
+
+	defer func() {
+		// Decrement the WaitGroup counter when the function exits
+		i.wg.Done()
+
+		if r := recover(); r != nil {
+			log.Println("Recovered in handleEvent", r)
+		}
+	}()
 
 	viper.SetConfigName("config") // name of config file (without extension)
 	viper.AddConfigPath(".")      // look for config in the working directory
@@ -541,6 +554,9 @@ func main() {
 
 	// Start listening for incoming chat messages
 	go handleMessages()
+
+	// Wait for all goroutines to finish before exiting
+	globalIndexer.wg.Wait()
 
 	// Start the server on localhost port 8080 and log any errors
 	log.Println("http server started on :8080")
