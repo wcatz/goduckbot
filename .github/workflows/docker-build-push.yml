@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - master
+    tags:
+      - 'v*.*.*' # Trigger on tags like v1.0.0
   pull_request:
     branches:
-      - master # Trigger on PRs to master (e.g., Dependabot PRs)
+      - master # Trigger on PRs to master (e.g., Dependabot)
 
 jobs:
   build-and-push:
@@ -28,10 +30,22 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
         if: github.event_name == 'push' # Only login for push events
 
+      - name: Extract tag for Docker image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/goduckbot
+          flavor: |
+            latest=${{ github.event_name == 'push' && github.ref_name == 'master' }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64 # Multi-arch support
           push: ${{ github.event_name == 'push' }} # Push only on push events
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/goduckbot:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
