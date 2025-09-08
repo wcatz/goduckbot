@@ -3,10 +3,10 @@ updates:
   - package-ecosystem: "gomod" # For Go modules
     directory: "/" # Location of go.mod
     schedule:
-      interval: "monthly" # Check for updates weekly (or daily, monthly)
-    open-pull-requests-limit: 10 # Max number of open PRs
+      interval: "monthly" # Check weekly (adjust to daily/monthly as needed)
+    open-pull-requests-limit: 10 # Max concurrent PRs
     commit-message:
       prefix: "deps" # Prefix for commit messages
       include: "scope" # Include scope in commit message
     labels:
-      - "dependencies" # Add label to PRs
+      - "dependencies" # Label for PRs
