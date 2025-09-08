@@ -28,6 +28,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64  # Single architecture
+          platforms: linux/amd64,linux/arm64  # Multi-arch
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/goduckbot:latest
