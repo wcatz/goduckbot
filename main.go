@@ -31,6 +31,7 @@ const (
         SecondsInDay        = 24 * 60 * 60
         ShelleyEpochStart   = "2020-07-29T21:44:51Z"
         StartingEpoch       = 208
+        maxRetryDuration    = time.Minute
 )
 
 // Define a variable to store the timestamp of the previous block event
@@ -215,7 +216,7 @@ func (i *Indexer) Start() error {
         for _, host := range hosts {
                 // Initialize the backoff strategy for each host attempt
                 bo := backoff.NewExponentialBackOff()
-                bo.MaxElapsedTime = time.Minute
+                bo.MaxElapsedTime = maxRetryDuration
 
                 // Wrap the pipeline start in a function for the backoff operation
                 startPipelineFunc := func() error {
