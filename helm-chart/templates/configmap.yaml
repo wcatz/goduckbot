@@ -15,6 +15,7 @@ data:
     nodeAddress: {{ .Values.config.nodeAddress | quote }}
     networkMagic: {{ .Values.config.networkMagic | int }}
     telegram:
+      token: {{ .Values.config.telegram.token | quote }}
       channel: {{ .Values.config.telegram.channel | quote }}
     twitter:
       api_version: "v2"
