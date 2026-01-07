@@ -17,7 +17,7 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
         with:
-          version: 'latest'
+          version: '3.13.3'
 
       - name: Login to GitHub Container Registry
         run: |
@@ -29,5 +29,5 @@ jobs:
 
       - name: Push Helm chart to GHCR
         run: |
-          CHART_VERSION=$(grep '^version:' helm-chart/Chart.yaml | awk '{print $2}')
+          CHART_VERSION=$(helm show chart helm-chart/ | grep '^version:' | awk '{print $2}')
           helm push goduckbot-${CHART_VERSION}.tgz oci://ghcr.io/wcatz/helm-charts
