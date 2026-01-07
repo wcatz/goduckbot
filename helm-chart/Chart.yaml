@@ -1,0 +1,6 @@
+apiVersion: v2
+name: goduckbot
+description: A Cardano stake pool notification bot for Telegram and Twitter
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

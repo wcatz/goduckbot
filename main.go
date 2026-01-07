@@ -31,6 +31,7 @@ const (
         SecondsInDay        = 24 * 60 * 60
         ShelleyEpochStart   = "2020-07-29T21:44:51Z"
         StartingEpoch       = 208
+        maxRetryDuration    = time.Minute
 )
 
 // Define a variable to store the timestamp of the previous block event
@@ -70,10 +71,10 @@ type Indexer struct {
 }
 
 type BlockEvent struct {
-        Type      string                 `json:"type"`
-        Timestamp string                 `json:"timestamp"`
-        Context   chainsync.BlockContext `json:"context"`
-        Payload   chainsync.BlockEvent   `json:"payload"`
+        Type      string              `json:"type"`
+        Timestamp string              `json:"timestamp"`
+        Context   event.BlockContext  `json:"context"`
+        Payload   event.BlockEvent    `json:"payload"`
 }
 
 // Function to calculate the current epoch number
@@ -209,58 +210,59 @@ func (i *Indexer) Start() error {
         if err != nil {
                 log.Printf("failed to send Telegram message: %s", err)
         }
-        const maxRetries = 3
-        // Wrap the pipeline start in a function for the backoff operation
-        startPipelineFunc := func(host string) error {
-                // Use the host to connect to the Cardano node
-                node := chainsync.WithAddress(host)
-                inputOpts := []chainsync.ChainSyncOptionFunc{
-                        node,
-                        chainsync.WithNetworkMagic(uint32(i.networkMagic)),
-                        chainsync.WithIntersectTip(true),
-                        chainsync.WithAutoReconnect(true),
-                chainsync.WithIncludeCbor(false),
-                }
 
-                i.pipeline = pipeline.New()
-                // Configure ChainSync input
-                input_chainsync := chainsync.New(inputOpts...)
-                i.pipeline.AddInput(input_chainsync)
-
-                // Configure filter to handle events
-                filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block"}))
-                i.pipeline.AddFilter(filterEvent)
-
-                // Configure embedded output with callback function
-                output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
-                i.pipeline.AddOutput(output)
-
-                err := i.pipeline.Start()
-                if err != nil {
-                        log.Printf("Failed to start pipeline: %s. Retrying...", err)
-                        return err
-                }
-
-                return nil
-        }
-
-        // Initialize the backoff strategy
-        bo := backoff.NewExponentialBackOff()
-        bo.MaxElapsedTime = time.Minute
-
+        // Try each host with exponential backoff
         hosts := i.nodeAddresses
         for _, host := range hosts {
-                for i := 0; i < maxRetries; i++ {
-                        err := startPipelineFunc(host)
-                        if err == nil {
-                                return nil
+                // Initialize the backoff strategy for each host attempt
+                bo := backoff.NewExponentialBackOff()
+                bo.MaxElapsedTime = maxRetryDuration
+
+                // Wrap the pipeline start in a function for the backoff operation
+                startPipelineFunc := func() error {
+                        // Use the host to connect to the Cardano node
+                        node := chainsync.WithAddress(host)
+                        inputOpts := []chainsync.ChainSyncOptionFunc{
+                                node,
+                                chainsync.WithNetworkMagic(uint32(i.networkMagic)),
+                                chainsync.WithIntersectTip(true),
+                                chainsync.WithAutoReconnect(true),
+                                chainsync.WithIncludeCbor(false),
                         }
-                        time.Sleep(time.Duration(i) * time.Second)
+
+                        i.pipeline = pipeline.New()
+                        // Configure ChainSync input
+                        input_chainsync := chainsync.New(inputOpts...)
+                        i.pipeline.AddInput(input_chainsync)
+
+                        // Configure filter to handle events
+                        filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block"}))
+                        i.pipeline.AddFilter(filterEvent)
+
+                        // Configure embedded output with callback function
+                        output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
+                        i.pipeline.AddOutput(output)
+
+                        err := i.pipeline.Start()
+                        if err != nil {
+                                log.Printf("Failed to start pipeline on %s: %s. Retrying...", host, err)
+                                return err
+                        }
+
+                        return nil
                 }
+
+                // Use exponential backoff retry
+                err := backoff.Retry(startPipelineFunc, bo)
+                if err == nil {
+                        log.Printf("Successfully connected to node at %s", host)
+                        return nil
+                }
+                log.Printf("Failed to connect to node at %s after retries: %s", host, err)
         }
 
-        log.Fatalf("Failed to start pipeline after several attempts")
-        return errors.New("Failed to start pipeline after several attempts")
+        log.Fatalf("Failed to start pipeline after trying all hosts")
+        return errors.New("Failed to start pipeline after trying all hosts")
 
 }
 
