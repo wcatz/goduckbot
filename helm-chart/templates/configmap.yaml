@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.fullname }}-config
+  labels:
+    app.kubernetes.io/name: {{ .Values.name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  config.yaml: |
+    poolId: {{ .Values.config.poolId | quote }}
+    ticker: {{ .Values.config.ticker | quote }}
+    poolName: {{ .Values.config.poolName | quote }}
+    nodeAddress: {{ .Values.config.nodeAddress | quote }}
+    networkMagic: {{ .Values.config.networkMagic | int }}
+    telegram:
+      channel: {{ .Values.config.telegram.channel | quote }}
+    twitter:
+      api_version: "v2"

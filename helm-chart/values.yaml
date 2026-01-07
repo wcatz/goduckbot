@@ -1,0 +1,31 @@
+replicaCount: 1
+
+fullname: goduckbot
+name: goduckbot
+
+image:
+  repository: wcatz/goduckbot
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+resources: {}
+
+config:
+  poolId: ""
+  ticker: ""
+  poolName: ""
+  nodeAddress: "cardano-node-mainnet-az1.cardano.svc.cluster.local:3001"
+  networkMagic: 764824073
+
+  telegram:
+    token: ""
+    channel: ""
+
+  twitter:
+    bearer_token: ""
+    api_key: ""
+    api_key_secret: ""
+    access_token: ""
+    access_token_secret: ""
+    client_id: ""
+    client_secret: ""
