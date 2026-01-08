@@ -29,5 +29,6 @@ jobs:
 
       - name: Push Helm chart to GHCR
         run: |
+          CHART_NAME=$(helm show chart helm-chart/ | grep '^name:' | awk '{print $2}')
           CHART_VERSION=$(helm show chart helm-chart/ | grep '^version:' | awk '{print $2}')
-          helm push goduckbot-${CHART_VERSION}.tgz oci://ghcr.io/wcatz/helm-charts
+          helm push ${CHART_NAME}-${CHART_VERSION}.tgz oci://ghcr.io/wcatz/helm-charts
