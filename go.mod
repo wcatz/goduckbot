@@ -10,6 +10,7 @@ require (
 	github.com/cardano-community/koios-go-client/v3 v3.1.3
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/michimani/gotwi v0.18.1
 	github.com/spf13/viper v1.21.0
 	gopkg.in/tucnak/telebot.v2 v2.5.0
 )
@@ -21,7 +22,7 @@ require (
 	github.com/SundaeSwap-finance/ogmigo/v6 v6.2.0 // indirect
 	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
-	github.com/blinklabs-io/gouroboros v0.148.0 // indirect
+	github.com/blinklabs-io/gouroboros v0.146.0 // indirect
 	github.com/blinklabs-io/plutigo v0.0.18 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
