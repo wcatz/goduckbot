@@ -8,6 +8,7 @@ import (
         "fmt"
         "log"
         "net/http"
+        "os"
         "strconv"
         "sync"
         "time"
@@ -120,7 +121,7 @@ func (i *Indexer) Start() error {
         i.ticker = viper.GetString("ticker")
         i.poolName = viper.GetString("poolName")
         i.telegramChannel = viper.GetString("telegram.channel")
-        i.telegramToken = viper.GetString("telegram.token")
+        i.telegramToken = os.Getenv("TELEGRAM_TOKEN")
         i.image = viper.GetString("image")
         i.networkMagic = viper.GetInt("networkMagic")
         // Store the node addresses hosts into the array nodeAddresses in the Indexer
