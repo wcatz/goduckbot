@@ -1,11 +1,14 @@
-# .github/dependabot.yml
 version: 2
 updates:
-  - package-ecosystem: "gomod"
-    directory: "/"
+  - package-ecosystem: "gomod" # For Go modules
+    directory: "/" # Location of go.mod
     schedule:
-      interval: "weekly" # or "daily", "monthly"
-    open-pull-requests-limit: 5
-    # Allow manually triggering via GitHub UI (enabled by default)
+      interval: "monthly" # Check weekly (adjust to daily/monthly as needed)
+    open-pull-requests-limit: 10 # Max concurrent PRs
+    commit-message:
+      prefix: "deps" # Prefix for commit messages
+      include: "scope" # Include scope in commit message
+    labels:
+      - "dependencies" # Label for PRs
     allow:
       - dependency-type: "all"
