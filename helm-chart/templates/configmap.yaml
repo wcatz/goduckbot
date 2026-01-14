@@ -12,7 +12,11 @@ data:
     poolId: {{ .Values.config.poolId | quote }}
     ticker: {{ .Values.config.ticker | quote }}
     poolName: {{ .Values.config.poolName | quote }}
-    nodeAddress: {{ .Values.config.nodeAddress | quote }}
+    nodeAddress:
+      host1: {{ .Values.config.nodeAddress.host1 | quote }}
+      {{- if .Values.config.nodeAddress.host2 }}
+      host2: {{ .Values.config.nodeAddress.host2 | quote }}
+      {{- end }}
     networkMagic: {{ .Values.config.networkMagic | int }}
     telegram:
       channel: {{ .Values.config.telegram.channel | quote }}
