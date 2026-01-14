@@ -6,6 +6,7 @@ import (
         "encoding/json"
         "errors"
         "fmt"
+        "io"
         "log"
         "net/http"
         "os"
@@ -22,6 +23,9 @@ import (
         koios "github.com/cardano-community/koios-go-client/v3"
         "github.com/cenkalti/backoff/v4"
         "github.com/gorilla/websocket"
+        "github.com/michimani/gotwi"
+        "github.com/michimani/gotwi/tweet/managetweet"
+        "github.com/michimani/gotwi/tweet/managetweet/types"
         "github.com/spf13/viper"
         telebot "gopkg.in/tucnak/telebot.v2"
 )
@@ -69,6 +73,9 @@ type Indexer struct {
         epoch           int
         networkMagic    int
         wg              sync.WaitGroup
+        // Twitter fields
+        twitterClient  *gotwi.Client
+        twitterEnabled bool
 }
 
 type BlockEvent struct {
@@ -136,6 +143,32 @@ func (i *Indexer) Start() error {
         })
         if err != nil {
                 log.Fatalf("failed to start bot: %s", err)
+        }
+
+        // Initialize Twitter client if credentials are provided
+        twitterAPIKey := os.Getenv("TWITTER_API_KEY")
+        twitterAPISecret := os.Getenv("TWITTER_API_KEY_SECRET")
+        twitterAccessToken := os.Getenv("TWITTER_ACCESS_TOKEN")
+        twitterAccessTokenSecret := os.Getenv("TWITTER_ACCESS_TOKEN_SECRET")
+
+        if twitterAPIKey != "" && twitterAPISecret != "" &&
+                twitterAccessToken != "" && twitterAccessTokenSecret != "" {
+                in := &gotwi.NewClientInput{
+                        AuthenticationMethod: gotwi.AuthenMethodOAuth1UserContext,
+                        OAuthToken:           twitterAccessToken,
+                        OAuthTokenSecret:     twitterAccessTokenSecret,
+                        APIKey:               twitterAPIKey,
+                        APIKeySecret:         twitterAPISecret,
+                }
+                i.twitterClient, err = gotwi.NewClient(in)
+                if err != nil {
+                        log.Printf("failed to initialize Twitter client: %s", err)
+                } else {
+                        i.twitterEnabled = true
+                        log.Println("Twitter client initialized successfully")
+                }
+        } else {
+                log.Println("Twitter credentials not provided, Twitter notifications disabled")
         }
 
         /// Initialize the kois client based on networkMagic number
@@ -357,15 +390,36 @@ func (i *Indexer) handleEvent(event event.Event) error {
                         timeDiffString, i.epochBlocks, i.totalBlocks,
                         blockEvent.Context.BlockNumber, blockEvent.Payload.BlockHash)
 
+                // Get duck image URL for both Telegram and Twitter
+                duckImageURL := getDuckImage()
+
                 // Send the message to the appropriate channel
                 channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
                 if err != nil {
                         log.Fatalf("failed to parse telegram channel ID: %s", err)
                 }
-                photo := &telebot.Photo{File: telebot.FromURL(getDuckImage()), Caption: msg}
+                photo := &telebot.Photo{File: telebot.FromURL(duckImageURL), Caption: msg}
                 _, err = i.bot.Send(&telebot.Chat{ID: channelID}, photo)
                 if err != nil {
                         log.Printf("failed to send Telegram message: %s", err)
+                }
+
+                // Send tweet if Twitter is enabled (shorter format for 280 char limit)
+                if i.twitterEnabled {
+                        tweetMsg := fmt.Sprintf(
+                                "🦆 New Block!\n\n"+
+                                        "Pool: %s\n"+
+                                        "Tx: %d | Size: %.2fKB\n"+
+                                        "Epoch: %d | Lifetime: %d\n\n"+
+                                        "pooltool.io/realtime/%d",
+                                i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB,
+                                i.epochBlocks, i.totalBlocks,
+                                blockEvent.Context.BlockNumber)
+
+                        err = i.sendTweet(tweetMsg, duckImageURL)
+                        if err != nil {
+                                log.Printf("failed to send tweet: %s", err)
+                        }
                 }
         }
 
@@ -430,6 +484,47 @@ func getDuckImage() string {
         json.NewDecoder(resp.Body).Decode(&result)
         imageURL := result["url"].(string)
         return imageURL
+}
+
+// Download image from URL to bytes
+func downloadImage(imageURL string) ([]byte, error) {
+        resp, err := http.Get(imageURL)
+        if err != nil {
+                return nil, fmt.Errorf("failed to download image: %w", err)
+        }
+        defer resp.Body.Close()
+
+        if resp.StatusCode != http.StatusOK {
+                return nil, fmt.Errorf("failed to download image: status %d", resp.StatusCode)
+        }
+
+        imageData, err := io.ReadAll(resp.Body)
+        if err != nil {
+                return nil, fmt.Errorf("failed to read image data: %w", err)
+        }
+
+        return imageData, nil
+}
+
+// Send tweet with optional image
+func (i *Indexer) sendTweet(text string, imageURL string) error {
+        if !i.twitterEnabled || i.twitterClient == nil {
+                return nil
+        }
+
+        // Create tweet request
+        input := &types.CreateInput{
+                Text: gotwi.String(text),
+        }
+
+        // Post the tweet
+        _, err := managetweet.Create(context.Background(), i.twitterClient, input)
+        if err != nil {
+                return fmt.Errorf("failed to post tweet: %w", err)
+        }
+
+        log.Println("Tweet posted successfully")
+        return nil
 }
 
 // Convert to bech32 poolID
