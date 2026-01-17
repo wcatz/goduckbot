@@ -36,10 +36,13 @@ jobs:
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/goduckbot
           flavor: |
-            latest=${{ github.event_name == 'push' }} # Apply latest on all push events (master or tags)
+            latest=${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
           tags: |
             type=ref,event=branch
+            type=ref,event=pr
             type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -49,3 +52,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.pull_request.updated_at || github.event.repository.updated_at }}
