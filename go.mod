@@ -2,7 +2,7 @@ module duckBot
 
 go 1.24.0
 
-toolchain go1.24.5
+toolchain go1.24.11
 
 require (
 	github.com/blinklabs-io/adder v0.35.0
@@ -22,7 +22,7 @@ require (
 	github.com/SundaeSwap-finance/ogmigo/v6 v6.2.0 // indirect
 	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
-	github.com/blinklabs-io/gouroboros v0.146.0 // indirect
+	github.com/blinklabs-io/gouroboros v0.142.0 // indirect
 	github.com/blinklabs-io/plutigo v0.0.18 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
@@ -60,3 +60,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+replace github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime => github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6
