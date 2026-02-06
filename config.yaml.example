@@ -14,3 +14,15 @@ twitter:
   consumer_secret: "YOUR_TWITTER_CONSUMER_SECRET"
   access_token: "YOUR_TWITTER_ACCESS_TOKEN"
   access_token_secret: "YOUR_TWITTER_ACCESS_TOKEN_SECRET"
+
+leaderlog:
+  enabled: true
+  vrfKeyPath: "/keys/vrf.skey"
+  timezone: "America/New_York"
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "goduckbot"
+  user: "goduckbot"
+  password: ""  # Or use GODUCKBOT_DB_PASSWORD env var
