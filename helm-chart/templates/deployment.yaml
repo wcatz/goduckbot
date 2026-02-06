@@ -27,11 +27,14 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            {{- if .Values.config.telegram.enabled }}
             - name: TELEGRAM_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.fullname }}-secrets
                   key: TELEGRAM_TOKEN
+            {{- end }}
+            {{- if .Values.config.twitter.enabled }}
             - name: TWITTER_BEARER_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -67,7 +70,8 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.fullname }}-secrets
                   key: TWITTER_CLIENT_SECRET
-            {{- if .Values.config.leaderlog.enabled }}
+            {{- end }}
+            {{- if and .Values.config.leaderlog.enabled (eq .Values.config.database.driver "postgres") }}
             - name: GODUCKBOT_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -86,6 +90,10 @@ spec:
               mountPath: {{ .Values.vrfKey.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if and .Values.persistence.enabled (eq .Values.config.database.driver "sqlite") }}
+            - name: data
+              mountPath: /data
+            {{- end }}
       volumes:
         - name: config-volume
           configMap:
@@ -97,5 +105,10 @@ spec:
         - name: vrf-key
           secret:
             secretName: {{ if .Values.vrfKey.content }}{{ .Values.fullname }}-vrf-key{{ else }}{{ required "vrfKey.secretName or vrfKey.content is required when leaderlog or vrfKey is enabled" .Values.vrfKey.secretName }}{{ end }}
+        {{- end }}
+        {{- if and .Values.persistence.enabled (eq .Values.config.database.driver "sqlite") }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.fullname }}-data
         {{- end }}
       restartPolicy: Always
