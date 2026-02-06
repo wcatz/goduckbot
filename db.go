@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schema = `
+const pgSchema = `
 CREATE TABLE IF NOT EXISTS blocks (
     slot         BIGINT PRIMARY KEY,
     epoch        INTEGER NOT NULL,
@@ -46,8 +46,13 @@ CREATE TABLE IF NOT EXISTS leader_schedules (
 );
 `
 
-// InitDB connects to PostgreSQL and creates tables if they don't exist.
-func InitDB(connString string) (*pgxpool.Pool, error) {
+// PgStore implements Store using PostgreSQL via pgx.
+type PgStore struct {
+	pool *pgxpool.Pool
+}
+
+// NewPgStore connects to PostgreSQL and creates tables if they don't exist.
+func NewPgStore(connString string) (*PgStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -61,18 +66,22 @@ func InitDB(connString string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	if _, err := pool.Exec(ctx, schema); err != nil {
+	if _, err := pool.Exec(ctx, pgSchema); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
 
-	log.Println("Database connected and schema initialized")
-	return pool, nil
+	log.Println("PostgreSQL connected and schema initialized")
+	return &PgStore{pool: pool}, nil
 }
 
-// InsertBlock stores a block's VRF data. Skips duplicates.
-func InsertBlock(ctx context.Context, pool *pgxpool.Pool, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) error {
-	_, err := pool.Exec(ctx,
+func (s *PgStore) Close() error {
+	s.pool.Close()
+	return nil
+}
+
+func (s *PgStore) InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) error {
+	_, err := s.pool.Exec(ctx,
 		`INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (slot) DO NOTHING`,
@@ -81,9 +90,8 @@ func InsertBlock(ctx context.Context, pool *pgxpool.Pool, slot uint64, epoch int
 	return err
 }
 
-// UpsertEvolvingNonce updates the running evolving nonce for an epoch.
-func UpsertEvolvingNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, nonce []byte, blockCount int) error {
-	_, err := pool.Exec(ctx,
+func (s *PgStore) UpsertEvolvingNonce(ctx context.Context, epoch int, nonce []byte, blockCount int) error {
+	_, err := s.pool.Exec(ctx,
 		`INSERT INTO epoch_nonces (epoch, evolving_nonce, block_count, updated_at)
 		 VALUES ($1, $2, $3, NOW())
 		 ON CONFLICT (epoch) DO UPDATE SET
@@ -95,9 +103,8 @@ func UpsertEvolvingNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, non
 	return err
 }
 
-// SetCandidateNonce freezes the candidate nonce at the stability window.
-func SetCandidateNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, nonce []byte) error {
-	_, err := pool.Exec(ctx,
+func (s *PgStore) SetCandidateNonce(ctx context.Context, epoch int, nonce []byte) error {
+	_, err := s.pool.Exec(ctx,
 		`INSERT INTO epoch_nonces (epoch, evolving_nonce, candidate_nonce, updated_at)
 		 VALUES ($1, $2, $2, NOW())
 		 ON CONFLICT (epoch) DO UPDATE SET
@@ -108,9 +115,8 @@ func SetCandidateNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, nonce
 	return err
 }
 
-// SetFinalNonce stores the calculated final epoch nonce.
-func SetFinalNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, nonce []byte, source string) error {
-	_, err := pool.Exec(ctx,
+func (s *PgStore) SetFinalNonce(ctx context.Context, epoch int, nonce []byte, source string) error {
+	_, err := s.pool.Exec(ctx,
 		`INSERT INTO epoch_nonces (epoch, evolving_nonce, final_nonce, source, updated_at)
 		 VALUES ($1, $2, $2, $3, NOW())
 		 ON CONFLICT (epoch) DO UPDATE SET
@@ -122,10 +128,9 @@ func SetFinalNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, nonce []b
 	return err
 }
 
-// GetFinalNonce retrieves the stored final nonce for an epoch.
-func GetFinalNonce(ctx context.Context, pool *pgxpool.Pool, epoch int) ([]byte, error) {
+func (s *PgStore) GetFinalNonce(ctx context.Context, epoch int) ([]byte, error) {
 	var nonce []byte
-	err := pool.QueryRow(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT final_nonce FROM epoch_nonces WHERE epoch = $1 AND final_nonce IS NOT NULL`,
 		epoch,
 	).Scan(&nonce)
@@ -135,11 +140,10 @@ func GetFinalNonce(ctx context.Context, pool *pgxpool.Pool, epoch int) ([]byte, 
 	return nonce, nil
 }
 
-// GetEvolvingNonce retrieves the current evolving nonce and block count for an epoch.
-func GetEvolvingNonce(ctx context.Context, pool *pgxpool.Pool, epoch int) ([]byte, int, error) {
+func (s *PgStore) GetEvolvingNonce(ctx context.Context, epoch int) ([]byte, int, error) {
 	var nonce []byte
 	var blockCount int
-	err := pool.QueryRow(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT evolving_nonce, block_count FROM epoch_nonces WHERE epoch = $1`,
 		epoch,
 	).Scan(&nonce, &blockCount)
@@ -149,8 +153,7 @@ func GetEvolvingNonce(ctx context.Context, pool *pgxpool.Pool, epoch int) ([]byt
 	return nonce, blockCount, nil
 }
 
-// InsertLeaderSchedule stores a calculated leader schedule.
-func InsertLeaderSchedule(ctx context.Context, pool *pgxpool.Pool, schedule *LeaderSchedule) error {
+func (s *PgStore) InsertLeaderSchedule(ctx context.Context, schedule *LeaderSchedule) error {
 	slotsJSON, err := json.Marshal(schedule.AssignedSlots)
 	if err != nil {
 		return fmt.Errorf("marshaling slots: %w", err)
@@ -161,7 +164,7 @@ func InsertLeaderSchedule(ctx context.Context, pool *pgxpool.Pool, schedule *Lea
 		performance = float64(len(schedule.AssignedSlots)) / schedule.IdealSlots * 100
 	}
 
-	_, err = pool.Exec(ctx,
+	_, err = s.pool.Exec(ctx,
 		`INSERT INTO leader_schedules (epoch, pool_stake, total_stake, epoch_nonce, sigma, ideal_slots, slot_count, performance, slots, calculated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 ON CONFLICT (epoch) DO UPDATE SET
@@ -188,10 +191,9 @@ func InsertLeaderSchedule(ctx context.Context, pool *pgxpool.Pool, schedule *Lea
 	return err
 }
 
-// IsSchedulePosted checks if a leader schedule has been posted for an epoch.
-func IsSchedulePosted(ctx context.Context, pool *pgxpool.Pool, epoch int) bool {
+func (s *PgStore) IsSchedulePosted(ctx context.Context, epoch int) bool {
 	var posted bool
-	err := pool.QueryRow(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT posted FROM leader_schedules WHERE epoch = $1`,
 		epoch,
 	).Scan(&posted)
@@ -201,11 +203,24 @@ func IsSchedulePosted(ctx context.Context, pool *pgxpool.Pool, epoch int) bool {
 	return posted
 }
 
-// MarkSchedulePosted marks a leader schedule as posted to Telegram.
-func MarkSchedulePosted(ctx context.Context, pool *pgxpool.Pool, epoch int) error {
-	_, err := pool.Exec(ctx,
+func (s *PgStore) MarkSchedulePosted(ctx context.Context, epoch int) error {
+	_, err := s.pool.Exec(ctx,
 		`UPDATE leader_schedules SET posted = TRUE WHERE epoch = $1`,
 		epoch,
 	)
 	return err
+}
+
+func (s *PgStore) GetLastSyncedSlot(ctx context.Context) (uint64, error) {
+	var slot *int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT MAX(slot) FROM blocks`,
+	).Scan(&slot)
+	if err != nil {
+		return 0, err
+	}
+	if slot == nil {
+		return 0, nil
+	}
+	return uint64(*slot), nil
 }

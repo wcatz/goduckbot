@@ -263,6 +263,29 @@ func GetEpochLength(networkMagic int) uint64 {
 	return MainnetEpochLength
 }
 
+// SlotToEpoch returns the epoch number for a given slot.
+// Accounts for Byron era offset on mainnet and preprod.
+func SlotToEpoch(slot uint64, networkMagic int) int {
+	switch networkMagic {
+	case MainnetNetworkMagic:
+		byronSlots := uint64(ShelleyStartEpoch) * ByronEpochLength
+		if slot < byronSlots {
+			return int(slot / ByronEpochLength)
+		}
+		return ShelleyStartEpoch + int((slot-byronSlots)/MainnetEpochLength)
+	case PreprodNetworkMagic:
+		byronSlots := uint64(PreprodShelleyStartEpoch) * ByronEpochLength
+		if slot < byronSlots {
+			return int(slot / ByronEpochLength)
+		}
+		return PreprodShelleyStartEpoch + int((slot-byronSlots)/MainnetEpochLength)
+	case PreviewNetworkMagic:
+		return int(slot / PreviewEpochLength)
+	default:
+		return int(slot / MainnetEpochLength)
+	}
+}
+
 // FormatScheduleForTelegram creates a Telegram message from a schedule
 func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone string) string {
 	loc, err := time.LoadLocation(timezone)
