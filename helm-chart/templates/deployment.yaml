@@ -96,6 +96,6 @@ spec:
         {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
         - name: vrf-key
           secret:
-            secretName: {{ required "vrfKey.secretName is required when leaderlog or vrfKey is enabled" .Values.vrfKey.secretName }}
+            secretName: {{ if .Values.vrfKey.content }}{{ .Values.fullname }}-vrf-key{{ else }}{{ required "vrfKey.secretName or vrfKey.content is required when leaderlog or vrfKey is enabled" .Values.vrfKey.secretName }}{{ end }}
         {{- end }}
       restartPolicy: Always
