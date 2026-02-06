@@ -32,3 +32,20 @@ config:
     access_token_secret: ""
     client_id: ""
     client_secret: ""
+
+  leaderlog:
+    enabled: false
+    vrfKeyPath: "/keys/vrf.skey"
+    timezone: "UTC"
+
+  database:
+    host: "k3s-postgres-rw.postgres.svc.cluster.local"
+    port: 5432
+    name: "goduckbot"
+    user: "goduckbot"
+    password: ""
+
+vrfKey:
+  enabled: false
+  secretName: ""
+  mountPath: "/keys"

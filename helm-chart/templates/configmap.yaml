@@ -22,3 +22,14 @@ data:
       channel: {{ .Values.config.telegram.channel | quote }}
     twitter:
       api_version: "v2"
+    {{- if .Values.config.leaderlog.enabled }}
+    leaderlog:
+      enabled: true
+      vrfKeyPath: {{ .Values.config.leaderlog.vrfKeyPath | quote }}
+      timezone: {{ .Values.config.leaderlog.timezone | quote }}
+    database:
+      host: {{ .Values.config.database.host | quote }}
+      port: {{ .Values.config.database.port | int }}
+      name: {{ .Values.config.database.name | quote }}
+      user: {{ .Values.config.database.user | quote }}
+    {{- end }}

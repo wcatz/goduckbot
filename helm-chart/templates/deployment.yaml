@@ -67,6 +67,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.fullname }}-secrets
                   key: TWITTER_CLIENT_SECRET
+            {{- if .Values.config.leaderlog.enabled }}
+            - name: GODUCKBOT_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.fullname }}-secrets
+                  key: GODUCKBOT_DB_PASSWORD
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
@@ -74,6 +81,11 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
+            {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
+            - name: vrf-key
+              mountPath: {{ .Values.vrfKey.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config-volume
           configMap:
@@ -81,4 +93,9 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
+        {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
+        - name: vrf-key
+          secret:
+            secretName: {{ required "vrfKey.secretName is required when leaderlog or vrfKey is enabled" .Values.vrfKey.secretName }}
+        {{- end }}
       restartPolicy: Always
