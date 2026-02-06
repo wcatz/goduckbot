@@ -81,11 +81,13 @@ type Indexer struct {
         twitterClient  *gotwi.Client
         twitterEnabled bool
         // Leaderlog fields
-        vrfKey           *VRFKey
-        leaderlogEnabled bool
-        leaderlogTZ      string
-        db               *pgxpool.Pool
-        nonceTracker     *NonceTracker
+        vrfKey            *VRFKey
+        leaderlogEnabled  bool
+        leaderlogTZ       string
+        db                *pgxpool.Pool
+        nonceTracker      *NonceTracker
+        leaderlogMu       sync.Mutex
+        leaderlogCalcing  map[int]bool // epochs currently being calculated
 }
 
 type BlockEvent struct {
@@ -235,6 +237,9 @@ func (i *Indexer) Start() error {
                 dbPassword := os.Getenv("GODUCKBOT_DB_PASSWORD")
                 if dbPassword == "" {
                         dbPassword = viper.GetString("database.password")
+                        if dbPassword != "" {
+                                log.Println("WARNING: using database password from config file; prefer GODUCKBOT_DB_PASSWORD env var")
+                        }
                 }
 
                 connString := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
@@ -248,6 +253,7 @@ func (i *Indexer) Start() error {
 
                 // Initialize nonce tracker
                 i.nonceTracker = NewNonceTracker(i.db, i.koios, i.epoch, i.networkMagic)
+                i.leaderlogCalcing = make(map[int]bool)
                 log.Println("Nonce tracker initialized")
         }
 
@@ -625,7 +631,7 @@ func extractVrfOutput(header interface{}) []byte {
 func (i *Indexer) getEpochProgress(slot uint64) float64 {
         epochStartSlot := GetEpochStartSlot(i.epoch, i.networkMagic)
         epochLen := GetEpochLength(i.networkMagic)
-        if epochLen == 0 {
+        if epochLen == 0 || slot < epochStartSlot {
                 return 0
         }
         return float64(slot-epochStartSlot) / float64(epochLen) * 100
@@ -641,11 +647,27 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
                 i.nonceTracker.FreezeCandidate(i.epoch)
         }
 
-        // Calculate leader schedule for current epoch at epoch start,
-        // or for next epoch after stability window
+        // Calculate leader schedule for next epoch after stability window
         nextEpoch := i.epoch + 1
-        if progress >= 70.0 && !IsSchedulePosted(context.Background(), i.db, nextEpoch) {
-                go i.calculateAndPostLeaderlog(nextEpoch)
+        if progress >= 70.0 {
+                i.leaderlogMu.Lock()
+                if i.leaderlogCalcing[nextEpoch] {
+                        i.leaderlogMu.Unlock()
+                        return
+                }
+                if IsSchedulePosted(context.Background(), i.db, nextEpoch) {
+                        i.leaderlogMu.Unlock()
+                        return
+                }
+                i.leaderlogCalcing[nextEpoch] = true
+                i.leaderlogMu.Unlock()
+
+                go func() {
+                        i.calculateAndPostLeaderlog(nextEpoch)
+                        i.leaderlogMu.Lock()
+                        delete(i.leaderlogCalcing, nextEpoch)
+                        i.leaderlogMu.Unlock()
+                }()
         }
 }
 

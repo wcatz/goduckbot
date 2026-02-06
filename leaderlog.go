@@ -1,7 +1,6 @@
 // leaderlog.go - CPRAOS Leader Schedule Calculation
 //
 // Validated against cncli for preview and mainnet networks.
-// See /home/wayne/git/infra/research/cardano-vrf-go/ for research.
 
 package main
 
@@ -249,7 +248,10 @@ func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone stri
 
 	poolStakeADA := int64(schedule.PoolStake / 1_000_000)
 	totalStakeADA := int64(schedule.TotalStake / 1_000_000)
-	performance := float64(len(schedule.AssignedSlots)) / schedule.IdealSlots * 100
+	performance := 0.0
+	if schedule.IdealSlots > 0 {
+		performance = float64(len(schedule.AssignedSlots)) / schedule.IdealSlots * 100
+	}
 
 	msg := fmt.Sprintf("🦆 %s Leader Schedule\n\n", poolName)
 	msg += fmt.Sprintf("Epoch: %d\n", schedule.Epoch)

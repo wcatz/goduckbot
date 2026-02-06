@@ -98,7 +98,11 @@ func UpsertEvolvingNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, non
 // SetCandidateNonce freezes the candidate nonce at the stability window.
 func SetCandidateNonce(ctx context.Context, pool *pgxpool.Pool, epoch int, nonce []byte) error {
 	_, err := pool.Exec(ctx,
-		`UPDATE epoch_nonces SET candidate_nonce = $2, updated_at = NOW() WHERE epoch = $1`,
+		`INSERT INTO epoch_nonces (epoch, evolving_nonce, candidate_nonce, updated_at)
+		 VALUES ($1, $2, $2, NOW())
+		 ON CONFLICT (epoch) DO UPDATE SET
+		   candidate_nonce = EXCLUDED.candidate_nonce,
+		   updated_at = NOW()`,
 		epoch, nonce,
 	)
 	return err
