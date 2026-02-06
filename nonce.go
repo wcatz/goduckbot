@@ -141,6 +141,41 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 	}
 }
 
+// ProcessBatch evolves the nonce in-memory for a pre-inserted batch of blocks.
+// Blocks must already be inserted into the DB via InsertBlockBatch (CopyFrom).
+// Persists the evolving nonce once per epoch transition and once at the end.
+func (nt *NonceTracker) ProcessBatch(blocks []BlockData) {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+
+	for _, b := range blocks {
+		if b.Epoch != nt.currentEpoch {
+			// Persist nonce for outgoing epoch before transition
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := nt.store.UpsertEvolvingNonce(ctx, nt.currentEpoch, nt.evolvingNonce, nt.blockCount); err != nil {
+				log.Printf("Failed to persist nonce for epoch %d at transition: %v", nt.currentEpoch, err)
+			}
+			cancel()
+
+			log.Printf("Epoch transition: %d -> %d (block count: %d)", nt.currentEpoch, b.Epoch, nt.blockCount)
+			nt.currentEpoch = b.Epoch
+			nt.blockCount = 0
+			nt.candidateFroze = false
+		}
+
+		nonceValue := vrfNonceValue(b.VrfOutput)
+		nt.evolvingNonce = evolveNonce(nt.evolvingNonce, nonceValue)
+		nt.blockCount++
+	}
+
+	// Persist final state
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := nt.store.UpsertEvolvingNonce(ctx, nt.currentEpoch, nt.evolvingNonce, nt.blockCount); err != nil {
+		log.Printf("Failed to upsert evolving nonce for epoch %d: %v", nt.currentEpoch, err)
+	}
+}
+
 // FreezeCandidate freezes the candidate nonce at the stability window.
 func (nt *NonceTracker) FreezeCandidate(epoch int) {
 	nt.mu.Lock()
