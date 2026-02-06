@@ -9,6 +9,7 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 data:
   config.yaml: |
+    mode: {{ .Values.config.mode | quote }}
     poolId: {{ .Values.config.poolId | quote }}
     ticker: {{ .Values.config.ticker | quote }}
     poolName: {{ .Values.config.poolName | quote }}
@@ -19,8 +20,10 @@ data:
       {{- end }}
     networkMagic: {{ .Values.config.networkMagic | int }}
     telegram:
+      enabled: {{ .Values.config.telegram.enabled }}
       channel: {{ .Values.config.telegram.channel | quote }}
     twitter:
+      enabled: {{ .Values.config.twitter.enabled }}
       api_version: "v2"
     {{- if .Values.config.leaderlog.enabled }}
     leaderlog:
@@ -28,8 +31,13 @@ data:
       vrfKeyPath: {{ .Values.config.leaderlog.vrfKeyPath | quote }}
       timezone: {{ .Values.config.leaderlog.timezone | quote }}
     database:
+      driver: {{ .Values.config.database.driver | quote }}
+      {{- if eq .Values.config.database.driver "sqlite" }}
+      path: {{ .Values.config.database.path | quote }}
+      {{- else }}
       host: {{ .Values.config.database.host | quote }}
       port: {{ .Values.config.database.port | int }}
       name: {{ .Values.config.database.name | quote }}
       user: {{ .Values.config.database.user | quote }}
+      {{- end }}
     {{- end }}

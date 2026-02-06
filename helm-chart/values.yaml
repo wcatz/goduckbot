@@ -11,6 +11,9 @@ image:
 resources: {}
 
 config:
+  # Mode: "lite" (default) or "full"
+  mode: "lite"
+
   poolId: ""
   ticker: ""
   poolName: ""
@@ -21,10 +24,12 @@ config:
   networkMagic: 764824073
 
   telegram:
+    enabled: true
     token: ""
     channel: ""
 
   twitter:
+    enabled: false
     bearer_token: ""
     api_key: ""
     api_key_secret: ""
@@ -39,6 +44,9 @@ config:
     timezone: ""
 
   database:
+    driver: "sqlite"
+    path: "/data/goduckbot.db"
+    # PostgreSQL settings (driver: postgres)
     host: ""
     port: 5432
     name: "goduckbot"
@@ -50,3 +58,10 @@ vrfKey:
   secretName: ""
   content: ""
   mountPath: "/keys"
+
+persistence:
+  enabled: false
+  size: "5Gi"
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
