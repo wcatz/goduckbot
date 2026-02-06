@@ -806,7 +806,7 @@ func makeSlotToTime(networkMagic int) func(uint64) time.Time {
                 }
 
         case PreprodNetworkMagic:
-                genesis, _ := time.Parse(time.RFC3339, "2022-04-01T00:00:00Z")
+                genesis, _ := time.Parse(time.RFC3339, "2022-06-01T00:00:00Z")
                 preprodByronSlots := uint64(PreprodShelleyStartEpoch) * ByronEpochLength // 86400
                 return func(slot uint64) time.Time {
                         if slot < preprodByronSlots {
