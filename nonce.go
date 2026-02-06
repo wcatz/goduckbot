@@ -116,17 +116,25 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 	// Compute nonce contribution
 	nonceValue := vrfNonceValue(vrfOutput)
 
-	// Update evolving nonce
-	nt.evolvingNonce = evolveNonce(nt.evolvingNonce, nonceValue)
-	nt.blockCount++
-
-	// Persist to DB (async-safe since we hold the lock)
+	// Insert block first — if it's a duplicate (already exists), skip nonce evolution
+	// to prevent corrupting the evolving nonce on restart.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := nt.store.InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue); err != nil {
+	inserted, err := nt.store.InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue)
+	if err != nil {
 		log.Printf("Failed to insert block %d: %v", slot, err)
+		return
 	}
+
+	// Only evolve nonce if this block was actually new (not a duplicate)
+	if !inserted {
+		return
+	}
+
+	// Update evolving nonce
+	nt.evolvingNonce = evolveNonce(nt.evolvingNonce, nonceValue)
+	nt.blockCount++
 
 	if err := nt.store.UpsertEvolvingNonce(ctx, epoch, nt.evolvingNonce, nt.blockCount); err != nil {
 		log.Printf("Failed to upsert evolving nonce for epoch %d: %v", epoch, err)

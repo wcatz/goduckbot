@@ -9,8 +9,11 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -152,15 +155,15 @@ func (s *ChainSyncer) getIntersectPoints(ctx context.Context) ([]pcommon.Point, 
 
 // getIntersectForSlot builds an intersect point for a known slot by querying the blocks table.
 func (s *ChainSyncer) getIntersectForSlot(ctx context.Context, slot uint64) (pcommon.Point, error) {
-	// Query the block hash from the store for this slot
-	// We need to add a method to get block hash by slot, but for now
-	// we can use a fallback approach: provide the Shelley intersect + origin
-	// and let the node find the best intersection.
-	if ip, ok := shelleyIntersectPoints[s.networkMagic]; ok {
-		hashBytes, _ := hex.DecodeString(ip.Hash)
-		return pcommon.NewPoint(ip.Slot, hashBytes), nil
+	hash, err := s.store.GetBlockHash(ctx, slot)
+	if err != nil {
+		return pcommon.Point{}, fmt.Errorf("no block hash for slot %d: %w", slot, err)
 	}
-	return pcommon.NewPointOrigin(), nil
+	hashBytes, err := hex.DecodeString(hash)
+	if err != nil {
+		return pcommon.Point{}, fmt.Errorf("decoding hash: %w", err)
+	}
+	return pcommon.NewPoint(slot, hashBytes), nil
 }
 
 // handleRollForward processes a block received during NtN chain sync.
@@ -228,20 +231,27 @@ func (s *ChainSyncer) handleRollBackward(ctx chainsync.CallbackContext, point pc
 
 // extractVrfFromHeader extracts VRF output from an NtN block header by era.
 func extractVrfFromHeader(blockType uint, header ledger.BlockHeader) []byte {
-	switch blockType {
-	case ledger.BlockTypeBabbage:
-		if h, ok := header.(*babbage.BabbageBlockHeader); ok {
-			return h.Body.VrfResult.Output
-		}
-	case ledger.BlockTypeConway:
-		if h, ok := header.(*conway.ConwayBlockHeader); ok {
-			return h.Body.VrfResult.Output
-		}
-	case ledger.BlockTypeShelley, ledger.BlockTypeAllegra, ledger.BlockTypeMary, ledger.BlockTypeAlonzo:
-		if h, ok := header.(*shelley.ShelleyBlockHeader); ok {
-			return h.Body.NonceVrf.Output
-		}
+	// Skip Byron blocks
+	if blockType == ledger.BlockTypeByronEbb || blockType == ledger.BlockTypeByronMain {
+		return nil
 	}
-	log.Printf("Could not extract VRF from header type %T (blockType=%d)", header, blockType)
-	return nil
+	// Each era has its own Go type that embeds the previous era's header.
+	// Must check each concrete type — Go type assertions don't match embedded types.
+	switch h := header.(type) {
+	case *conway.ConwayBlockHeader:
+		return h.Body.VrfResult.Output
+	case *babbage.BabbageBlockHeader:
+		return h.Body.VrfResult.Output
+	case *alonzo.AlonzoBlockHeader:
+		return h.Body.NonceVrf.Output
+	case *mary.MaryBlockHeader:
+		return h.Body.NonceVrf.Output
+	case *allegra.AllegraBlockHeader:
+		return h.Body.NonceVrf.Output
+	case *shelley.ShelleyBlockHeader:
+		return h.Body.NonceVrf.Output
+	default:
+		log.Printf("Could not extract VRF from header type %T (blockType=%d)", header, blockType)
+		return nil
+	}
 }

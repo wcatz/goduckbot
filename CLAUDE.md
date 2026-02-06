@@ -238,3 +238,284 @@ Test files:
 - `jackc/pgx/v5` — PostgreSQL driver
 - `cardano-community/koios-go-client/v3` — Koios API
 - `golang.org/x/crypto` — blake2b hashing
+
+---
+
+## Bugs To Fix (2026-02-06)
+
+Three blocking bugs prevent full historical chain sync from completing. Fix in priority order — **all three must be resolved before re-syncing**.
+
+After fixing, **truncate all three tables** and re-sync from scratch (epoch nonce data is corrupted from previous partial runs).
+
+### Bug 1: Mary/Allegra/Alonzo VRF Extraction (BLOCKING — sync.go)
+
+**Symptom:** `Could not extract VRF from header type *mary.MaryBlockHeader (blockType=4)` spams continuously. Sync runs but records zero blocks for Mary era and beyond. DB freezes at epoch ~235 (last Shelley/Allegra epoch).
+
+**Root cause:** In `extractVrfFromHeader()` (sync.go:230-247), the type assertion `header.(*shelley.ShelleyBlockHeader)` fails for Mary blocks because gouroboros returns them as `*mary.MaryBlockHeader`, a distinct Go type that **embeds** `shelley.ShelleyBlockHeader` but doesn't satisfy the type assertion.
+
+Same issue likely affects Allegra (`*allegra.AllegraBlockHeader`) and Alonzo (`*alonzo.AlonzoBlockHeader`).
+
+**gouroboros source** (`ledger/mary/mary.go:181`):
+```go
+type MaryBlockHeader struct {
+    shelley.ShelleyBlockHeader   // embeds, not aliases
+}
+```
+
+**Fix in `sync.go`:**
+
+1. Add imports:
+```go
+import (
+    "github.com/blinklabs-io/gouroboros/ledger/allegra"
+    "github.com/blinklabs-io/gouroboros/ledger/alonzo"
+    "github.com/blinklabs-io/gouroboros/ledger/mary"
+)
+```
+
+2. Replace `extractVrfFromHeader()` — use a type switch instead of blockType switch:
+```go
+func extractVrfFromHeader(blockType uint, header ledger.BlockHeader) []byte {
+    // Skip Byron
+    if blockType == ledger.BlockTypeByronEbb || blockType == ledger.BlockTypeByronMain {
+        return nil
+    }
+    // Each era has its own Go type that embeds the previous era's header.
+    // Must check each concrete type — Go type assertions don't match embedded types.
+    switch h := header.(type) {
+    case *conway.ConwayBlockHeader:
+        return h.Body.VrfResult.Output
+    case *babbage.BabbageBlockHeader:
+        return h.Body.VrfResult.Output
+    case *alonzo.AlonzoBlockHeader:
+        return h.Body.NonceVrf.Output
+    case *mary.MaryBlockHeader:
+        return h.Body.NonceVrf.Output
+    case *allegra.AllegraBlockHeader:
+        return h.Body.NonceVrf.Output
+    case *shelley.ShelleyBlockHeader:
+        return h.Body.NonceVrf.Output
+    default:
+        log.Printf("Could not extract VRF from header type %T (blockType=%d)", header, blockType)
+        return nil
+    }
+}
+```
+
+**Key insight:** `MaryBlockHeader` embeds `ShelleyBlockHeader`, so `h.Body.NonceVrf.Output` works via promotion — but the type assertion must match the concrete type. Order doesn't matter in a type switch (unlike interface assertions), but it's clearest to go newest→oldest.
+
+**Also fix `extractVrfOutput()` in `main.go`** (adder live tail path, line 715-728) — same pattern. The adder path may also receive era-specific types depending on the adder version. Add the same allegra/mary/alonzo cases to be safe.
+
+### Bug 2: Resume Logic Corrupts Nonce Evolution (nonce.go + sync.go)
+
+**Symptom:** `epoch_nonces.block_count` for early epochs inflated way beyond actual block count (epoch 208: 47,819 in epoch_nonces vs 21,556 actual blocks). Nonce values are wrong.
+
+**Root cause:** On restart, `getIntersectPoints()` (sync.go:125-151) detects `GetLastSyncedSlot() = 5138240` but `getIntersectForSlot()` (sync.go:154-164) **always falls back to the Shelley intersect point** (slot 4492799) because it doesn't actually look up the block hash. So the chain sync restarts from Shelley genesis every time.
+
+Meanwhile, `ProcessBlock()` (nonce.go:90-134) restores the evolving nonce from DB on epoch transition (line 102-108), then re-hashes the same VRF outputs into it. The block INSERTs are idempotent (`ON CONFLICT DO NOTHING`), but the nonce evolution accumulates duplicates:
+- Run 1: hash(genesis, block1, block2, ..., blockN) → stored as evolving_nonce
+- Run 2: hash(stored_nonce, block1, block2, ..., blockN) → wrong!
+
+**Two fixes needed (choose one approach):**
+
+**Option A (recommended): Actually resume from last synced slot**
+
+Add `GetBlockHash(ctx, slot)` method to `Store` interface and both implementations:
+```go
+// Store interface addition
+GetBlockHash(ctx context.Context, slot uint64) (string, error)
+
+// PgStore implementation (db.go)
+func (s *PgStore) GetBlockHash(ctx context.Context, slot uint64) (string, error) {
+    var hash string
+    err := s.pool.QueryRow(ctx,
+        `SELECT block_hash FROM blocks WHERE slot = $1`, int64(slot),
+    ).Scan(&hash)
+    return hash, err
+}
+```
+
+Then fix `getIntersectForSlot()` in sync.go:
+```go
+func (s *ChainSyncer) getIntersectForSlot(ctx context.Context, slot uint64) (pcommon.Point, error) {
+    hash, err := s.store.GetBlockHash(ctx, slot)
+    if err != nil {
+        return pcommon.Point{}, fmt.Errorf("no block hash for slot %d: %w", slot, err)
+    }
+    hashBytes, err := hex.DecodeString(hash)
+    if err != nil {
+        return pcommon.Point{}, fmt.Errorf("decoding hash: %w", err)
+    }
+    return pcommon.NewPoint(slot, hashBytes), nil
+}
+```
+
+And in `ProcessBlock()` (nonce.go), skip blocks already in DB:
+```go
+// At start of ProcessBlock, before nonce evolution:
+// Check if block already exists (idempotency for nonce too)
+err := nt.store.InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue)
+if err != nil {
+    log.Printf("Failed to insert block %d: %v", slot, err)
+}
+// If block was a duplicate (already existed), skip nonce evolution
+// Need a way to detect ON CONFLICT DO NOTHING affected 0 rows
+```
+
+For this to work cleanly, modify `InsertBlock` to return whether the row was actually inserted (not a conflict):
+```go
+// Change Store interface:
+InsertBlock(ctx, ...) (bool, error)  // returns (inserted bool, err)
+
+// PgStore:
+result, err := s.pool.Exec(ctx, `INSERT ... ON CONFLICT DO NOTHING`, ...)
+return result.RowsAffected() > 0, err
+```
+
+Then in `ProcessBlock`, only evolve nonce if `inserted == true`.
+
+**Option B (simpler): Clear nonce state on fresh sync start**
+
+In `getIntersectPoints()`, when falling back to Shelley genesis (line 137-147), also clear the epoch_nonces table:
+```go
+log.Printf("Could not get intersect for slot %d, falling back to Shelley genesis", lastSlot)
+// Clear stale nonce data since we're re-syncing from scratch
+s.store.ClearEpochNonces(ctx)  // new method: DELETE FROM epoch_nonces
+```
+
+This is simpler but means every restart re-syncs everything. Option A is better for production.
+
+### Bug 3: Keep-Alive Timeout on Slow DB Writes (sync.go + nonce.go)
+
+**Symptom:** `keep-alive: timeout waiting on transition from protocol state Client` after ~15 minutes of historical sync. The cardano-node drops the NtN connection because the client falls behind the keep-alive deadline.
+
+**Root cause:** Each block triggers synchronous DB writes in `ProcessBlock()`: `InsertBlock()` + `UpsertEvolvingNonce()`. At ~5 blocks/sec with remote DB, accumulated latency exceeds the ouroboros mini-protocol keep-alive window.
+
+**Observed performance:**
+
+| Placement | Blocks/sec | Notes |
+|-----------|-----------|-------|
+| goduckbot on k3s-mini-1, node on k3s-mobile-2 (same LAN) | ~1,700 | Best — LAN node + local postgres |
+| goduckbot on k3s-mini-1, node on k3s-control-1 (Tailscale mesh) | ~94 | Good — local postgres, remote node |
+| goduckbot on k3s-control-1, node on k3s-control-1 (co-located) | ~5 | Worst — CPU contention + remote postgres |
+
+At 1,700 blocks/sec (LAN node), the sync may complete without timeout (~2.1 hours for ~13M blocks). But for robustness, these fixes are needed:
+
+**Fix 3a: Decouple sync from DB with a buffered channel**
+
+In `main.go` where the ChainSyncer is created (line 363-378), use a channel instead of direct `ProcessBlock`:
+
+```go
+type BlockData struct {
+    Slot      uint64
+    Epoch     int
+    BlockHash string
+    VrfOutput []byte
+}
+
+blockCh := make(chan BlockData, 10000)
+
+// DB writer goroutine — drains channel in batches
+go func() {
+    batch := make([]BlockData, 0, 1000)
+    ticker := time.NewTicker(2 * time.Second)
+    defer ticker.Stop()
+    for {
+        select {
+        case b, ok := <-blockCh:
+            if !ok { return }
+            batch = append(batch, b)
+            if len(batch) >= 1000 {
+                flushBatch(batch, i.nonceTracker)
+                batch = batch[:0]
+            }
+        case <-ticker.C:
+            if len(batch) > 0 {
+                flushBatch(batch, i.nonceTracker)
+                batch = batch[:0]
+            }
+        }
+    }
+}()
+
+// ChainSyncer callback just sends to channel (non-blocking)
+i.syncer = NewChainSyncer(
+    i.store, i.networkMagic, i.nodeAddresses[0],
+    func(slot uint64, epoch int, blockHash string, vrfOutput []byte) {
+        blockCh <- BlockData{slot, epoch, blockHash, vrfOutput}
+    },
+    onCaughtUp,
+)
+```
+
+**Fix 3b: Batch DB writes in Store**
+
+Add batch methods to `Store` interface:
+```go
+InsertBlockBatch(ctx context.Context, blocks []BlockData) error
+```
+
+PostgreSQL implementation using multi-row INSERT or `COPY`:
+```go
+func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
+    // Use pgx CopyFrom for best performance
+    rows := make([][]interface{}, len(blocks))
+    for i, b := range blocks {
+        nonce := vrfNonceValue(b.VrfOutput)
+        rows[i] = []interface{}{int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonce}
+    }
+    _, err := s.pool.CopyFrom(ctx,
+        pgx.Identifier{"blocks"},
+        []string{"slot", "epoch", "block_hash", "vrf_output", "nonce_value"},
+        pgx.CopyFromRows(rows),
+    )
+    return err
+}
+```
+
+**Fix 3c: Retry/reconnect on timeout**
+
+In `main.go` (line 380-384), add retry loop around historical sync:
+```go
+maxRetries := 10
+for attempt := 1; attempt <= maxRetries; attempt++ {
+    if err := i.syncer.Start(syncCtx); err != nil {
+        log.Printf("Historical sync error (attempt %d/%d): %s", attempt, maxRetries, err)
+        if attempt < maxRetries {
+            time.Sleep(time.Duration(attempt) * 5 * time.Second)
+            // Recreate syncer — it will resume from GetLastSyncedSlot
+            i.syncer = NewChainSyncer(...)
+            continue
+        }
+        log.Printf("Historical sync failed after %d attempts, falling through to adder", maxRetries)
+    }
+    break
+}
+```
+
+### Deployment After Fixes
+
+1. Fix all three bugs
+2. Build and push new image
+3. Truncate DB tables (data is corrupted from partial runs):
+   ```sql
+   -- Connect to k3s-postgres-2 (current primary)
+   TRUNCATE blocks, epoch_nonces, leader_schedules;
+   ```
+4. Restart goduckbot pod — it will start a clean sync from Shelley genesis
+5. At ~1,700 blocks/sec, full sync takes ~2.1 hours
+
+### Current K8s Deployment State
+
+- **Pod**: `goduckbot` on `k3s-mini-1` (co-located with postgres primary k3s-postgres-2)
+- **Node address**: `cardano-node-mainnet-mobile2.cardano.svc.cluster.local:3001` (k3s-mobile-2, same LAN as mini-1)
+- **Fallback**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:3001`
+- **DB**: PostgreSQL on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
+- **Mode**: full, leaderlog enabled, telegram enabled, twitter disabled
+- **Image**: `wcatz/goduckbot:master` (pullPolicy: Always)
+
+### Estimated Full Sync (clean run)
+
+- **Total blocks:** ~13M (Shelley epoch 208 → current epoch 611)
+- **At ~1,700 blocks/sec** (LAN node): ~2.1 hours
+- **Database size:** ~3–3.5 GB (blocks table: ~235 bytes/row × 13M rows)

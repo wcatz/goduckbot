@@ -20,8 +20,11 @@ import (
 	"github.com/blinklabs-io/adder/input/chainsync"
 	output_embedded "github.com/blinklabs-io/adder/output/embedded"
 	"github.com/blinklabs-io/adder/pipeline"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/btcsuite/btcutil/bech32"
 	koios "github.com/cardano-community/koios-go-client/v3"
@@ -360,33 +363,89 @@ func (i *Indexer) Start() error {
 		syncCtx, syncCancel := context.WithCancel(context.Background())
 		defer syncCancel()
 
-		i.syncer = NewChainSyncer(
-			i.store,
-			i.networkMagic,
-			i.nodeAddresses[0],
-			func(slot uint64, epoch int, blockHash string, vrfOutput []byte) {
-				i.nonceTracker.ProcessBlock(slot, epoch, blockHash, vrfOutput)
-			},
-			func() {
-				log.Println("Historical sync caught up, starting live tail...")
-				go func() {
-					if err := i.startAdderPipeline(); err != nil {
-						log.Printf("Failed to start adder pipeline after sync: %s", err)
-					}
-				}()
-			},
-		)
+		// Buffered channel decouples fast chain sync from slower DB writes
+		blockCh := make(chan BlockData, 10000)
 
-		// Run historical sync (blocks until caught up or error)
-		if err := i.syncer.Start(syncCtx); err != nil {
-			log.Printf("Historical sync error: %s", err)
-			// Fall through to start adder pipeline anyway
+		onCaughtUp := func() {
+			log.Println("Historical sync caught up, starting live tail...")
+			go func() {
+				if err := i.startAdderPipeline(); err != nil {
+					log.Printf("Failed to start adder pipeline after sync: %s", err)
+				}
+			}()
 		}
+
+		// DB writer goroutine — drains channel in batches for throughput
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			batch := make([]BlockData, 0, 1000)
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case b, ok := <-blockCh:
+					if !ok {
+						// Channel closed — flush remaining
+						if len(batch) > 0 {
+							i.flushBlockBatch(batch)
+						}
+						return
+					}
+					batch = append(batch, b)
+					if len(batch) >= 1000 {
+						i.flushBlockBatch(batch)
+						batch = batch[:0]
+					}
+				case <-ticker.C:
+					if len(batch) > 0 {
+						i.flushBlockBatch(batch)
+						batch = batch[:0]
+					}
+				}
+			}
+		}()
+
+		// Retry loop — on keep-alive timeout, reconnect and resume from GetLastSyncedSlot
+		maxRetries := 10
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			i.syncer = NewChainSyncer(
+				i.store,
+				i.networkMagic,
+				i.nodeAddresses[0],
+				func(slot uint64, epoch int, blockHash string, vrfOutput []byte) {
+					blockCh <- BlockData{Slot: slot, Epoch: epoch, BlockHash: blockHash, VrfOutput: vrfOutput}
+				},
+				onCaughtUp,
+			)
+
+			if err := i.syncer.Start(syncCtx); err != nil {
+				log.Printf("Historical sync error (attempt %d/%d): %s", attempt, maxRetries, err)
+				if attempt < maxRetries {
+					time.Sleep(time.Duration(attempt) * 5 * time.Second)
+					continue
+				}
+				log.Printf("Historical sync failed after %d attempts, falling through to adder", maxRetries)
+			}
+			break
+		}
+
+		close(blockCh)
+		<-writerDone // wait for DB writer to flush
 		return nil
 	}
 
 	// Lite mode (or full mode without leaderlog): start adder pipeline directly
 	return i.startAdderPipeline()
+}
+
+// flushBlockBatch processes a batch of blocks through the nonce tracker.
+// Nonce evolution is order-dependent, so blocks are processed sequentially.
+// ProcessBlock handles InsertBlock (with deduplication) and nonce evolution internally.
+func (i *Indexer) flushBlockBatch(batch []BlockData) {
+	for _, b := range batch {
+		i.nonceTracker.ProcessBlock(b.Slot, b.Epoch, b.BlockHash, b.VrfOutput)
+	}
 }
 
 // startAdderPipeline starts the adder pipeline for live chain tail.
@@ -718,6 +777,12 @@ func extractVrfOutput(header interface{}) []byte {
 		return h.Body.VrfResult.Output
 	case *babbage.BabbageBlockHeader:
 		return h.Body.VrfResult.Output
+	case *alonzo.AlonzoBlockHeader:
+		return h.Body.NonceVrf.Output
+	case *mary.MaryBlockHeader:
+		return h.Body.NonceVrf.Output
+	case *allegra.AllegraBlockHeader:
+		return h.Body.NonceVrf.Output
 	case *shelley.ShelleyBlockHeader:
 		// Pre-Babbage eras have separate nonce VRF
 		return h.Body.NonceVrf.Output
