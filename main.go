@@ -184,8 +184,8 @@ func (i *Indexer) Start() error {
                 log.Println("Twitter credentials not provided, Twitter notifications disabled")
         }
 
-        /// Initialize the kois client based on networkMagic number
-        if i.networkMagic == 1 {
+        /// Initialize the koios client based on networkMagic number
+        if i.networkMagic == PreprodNetworkMagic {
                 i.koios, e = koios.New(
                         koios.Host(koios.PreProdHost),
                         koios.APIVersion("v1"),
@@ -193,7 +193,7 @@ func (i *Indexer) Start() error {
                 if e != nil {
                         log.Fatal(e)
                 }
-        } else if i.networkMagic == 2 {
+        } else if i.networkMagic == PreviewNetworkMagic {
                 i.koios, e = koios.New(
                         koios.Host(koios.PreviewHost),
                         koios.APIVersion("v1"),
@@ -414,9 +414,9 @@ func (i *Indexer) handleEvent(evt event.Event) error {
         // Customize links based on the network magic number
         var cexplorerLink string
         switch i.networkMagic {
-        case 1:
+        case PreprodNetworkMagic:
                 cexplorerLink = "https://preprod.cexplorer.io/block/"
-        case 2:
+        case PreviewNetworkMagic:
                 cexplorerLink = "https://preview.cexplorer.io/block/"
         default:
                 cexplorerLink = "https://cexplorer.io/block/"
@@ -757,10 +757,28 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
                 return
         }
 
-        _, err = i.bot.Send(&telebot.Chat{ID: channelID}, msg)
-        if err != nil {
-                log.Printf("Failed to send leaderlog to Telegram: %v", err)
-                return
+        chat := &telebot.Chat{ID: channelID}
+        // Telegram messages are limited to 4096 characters
+        for len(msg) > 0 {
+                chunk := msg
+                if len(chunk) > 4096 {
+                        // Split at last newline before 4096
+                        cut := 4096
+                        for cut > 0 && chunk[cut-1] != '\n' {
+                                cut--
+                        }
+                        if cut == 0 {
+                                cut = 4096
+                        }
+                        chunk = msg[:cut]
+                        msg = msg[cut:]
+                } else {
+                        msg = ""
+                }
+                if _, sendErr := i.bot.Send(chat, chunk); sendErr != nil {
+                        log.Printf("Failed to send leaderlog to Telegram: %v", sendErr)
+                        return
+                }
         }
 
         // Mark as posted
@@ -775,27 +793,40 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 func makeSlotToTime(networkMagic int) func(uint64) time.Time {
         shelleyStart, _ := time.Parse(time.RFC3339, ShelleyEpochStart)
 
-        if networkMagic == 764824073 { // mainnet
-                // Shelley started at slot 4492800
-                return func(slot uint64) time.Time {
-                        return shelleyStart.Add(time.Duration(int64(slot)-4492800) * time.Second)
-                }
-        }
+        // Byron-Shelley boundary slot count
+        byronSlots := uint64(ShelleyStartEpoch) * ByronEpochLength // mainnet: 4492800
 
-        // Preview/preprod — slot 0 starts at network genesis
-        // Preview: 2022-11-01T00:00:00Z, Preprod: 2022-04-01T00:00:00Z
-        var genesis time.Time
         switch networkMagic {
-        case 2: // preview
-                genesis, _ = time.Parse(time.RFC3339, "2022-11-01T00:00:00Z")
-        case 1: // preprod
-                genesis, _ = time.Parse(time.RFC3339, "2022-04-01T00:00:00Z")
-        default:
-                genesis = shelleyStart
-        }
+        case MainnetNetworkMagic:
+                return func(slot uint64) time.Time {
+                        if slot < byronSlots {
+                                return shelleyStart.Add(-time.Duration(byronSlots-slot) * 20 * time.Second)
+                        }
+                        return shelleyStart.Add(time.Duration(slot-byronSlots) * time.Second)
+                }
 
-        return func(slot uint64) time.Time {
-                return genesis.Add(time.Duration(slot) * time.Second)
+        case PreprodNetworkMagic:
+                genesis, _ := time.Parse(time.RFC3339, "2022-04-01T00:00:00Z")
+                preprodByronSlots := uint64(PreprodShelleyStartEpoch) * ByronEpochLength // 86400
+                return func(slot uint64) time.Time {
+                        if slot < preprodByronSlots {
+                                return genesis.Add(time.Duration(slot) * 20 * time.Second)
+                        }
+                        byronDuration := time.Duration(preprodByronSlots) * 20 * time.Second
+                        shelleySlots := slot - preprodByronSlots
+                        return genesis.Add(byronDuration + time.Duration(shelleySlots)*time.Second)
+                }
+
+        case PreviewNetworkMagic:
+                genesis, _ := time.Parse(time.RFC3339, "2022-11-01T00:00:00Z")
+                return func(slot uint64) time.Time {
+                        return genesis.Add(time.Duration(slot) * time.Second)
+                }
+
+        default:
+                return func(slot uint64) time.Time {
+                        return shelleyStart.Add(time.Duration(slot) * time.Second)
+                }
         }
 }
 
