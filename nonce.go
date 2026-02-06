@@ -80,9 +80,20 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 	if epoch != nt.currentEpoch {
 		log.Printf("Epoch transition: %d -> %d", nt.currentEpoch, epoch)
 		nt.currentEpoch = epoch
-		nt.evolvingNonce = make([]byte, 32)
 		nt.blockCount = 0
 		nt.candidateFroze = false
+
+		// Try to restore evolving nonce from DB (e.g., after restart mid-epoch)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		nonce, bc, err := GetEvolvingNonce(ctx, nt.db, epoch)
+		cancel()
+		if err == nil && nonce != nil {
+			nt.evolvingNonce = nonce
+			nt.blockCount = bc
+			log.Printf("Restored evolving nonce for epoch %d from DB (block count: %d)", epoch, bc)
+		} else {
+			nt.evolvingNonce = make([]byte, 32)
+		}
 	}
 
 	// Compute nonce contribution
@@ -110,7 +121,7 @@ func (nt *NonceTracker) FreezeCandidate(epoch int) {
 	nt.mu.Lock()
 	defer nt.mu.Unlock()
 
-	if nt.candidateFroze {
+	if nt.candidateFroze || epoch != nt.currentEpoch {
 		return
 	}
 
