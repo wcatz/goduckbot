@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -80,14 +81,17 @@ func (s *PgStore) Close() error {
 	return nil
 }
 
-func (s *PgStore) InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) error {
-	_, err := s.pool.Exec(ctx,
+func (s *PgStore) InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) (bool, error) {
+	result, err := s.pool.Exec(ctx,
 		`INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (slot) DO NOTHING`,
 		int64(slot), epoch, blockHash, vrfOutput, nonceValue,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
 }
 
 func (s *PgStore) UpsertEvolvingNonce(ctx context.Context, epoch int, nonce []byte, blockCount int) error {
@@ -223,4 +227,27 @@ func (s *PgStore) GetLastSyncedSlot(ctx context.Context) (uint64, error) {
 		return 0, nil
 	}
 	return uint64(*slot), nil
+}
+
+func (s *PgStore) GetBlockHash(ctx context.Context, slot uint64) (string, error) {
+	var hash string
+	err := s.pool.QueryRow(ctx,
+		`SELECT block_hash FROM blocks WHERE slot = $1`,
+		int64(slot),
+	).Scan(&hash)
+	return hash, err
+}
+
+func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
+	rows := make([][]interface{}, len(blocks))
+	for i, b := range blocks {
+		nonceValue := vrfNonceValue(b.VrfOutput)
+		rows[i] = []interface{}{int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue}
+	}
+	_, err := s.pool.CopyFrom(ctx,
+		pgx.Identifier{"blocks"},
+		[]string{"slot", "epoch", "block_hash", "vrf_output", "nonce_value"},
+		pgx.CopyFromRows(rows),
+	)
+	return err
 }
