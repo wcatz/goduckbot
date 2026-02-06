@@ -22,14 +22,20 @@ const (
 	// ActiveSlotCoeff is the probability a slot has a leader (5% on mainnet)
 	ActiveSlotCoeff = 0.05
 
-	// MainnetEpochLength is slots per epoch on mainnet
+	// MainnetEpochLength is slots per epoch on mainnet and preprod
 	MainnetEpochLength = 432000
 
 	// PreviewEpochLength is slots per epoch on preview
 	PreviewEpochLength = 86400
 
-	// ShelleyStartEpoch is the first Shelley epoch
+	// ByronEpochLength is slots per epoch during the Byron era (20s slots)
+	ByronEpochLength = 21600
+
+	// ShelleyStartEpoch is the first Shelley epoch on mainnet
 	ShelleyStartEpoch = 208
+
+	// PreprodShelleyStartEpoch is the first Shelley epoch on preprod
+	PreprodShelleyStartEpoch = 4
 )
 
 // LeaderSlot represents an assigned slot in the schedule
@@ -214,21 +220,24 @@ func CalculateLeaderSchedule(
 	return schedule, nil
 }
 
-// GetEpochStartSlot calculates the first slot of an epoch
-// For mainnet, accounts for Byron era offset
+// GetEpochStartSlot calculates the first slot of an epoch.
+// Accounts for Byron era offset on mainnet and preprod.
 func GetEpochStartSlot(epoch int, networkMagic int) uint64 {
-	if networkMagic == 764824073 { // mainnet
-		// Byron had 208 epochs, Shelley started at slot 4492800
-		// (208 * 21600 = 4,492,800 Byron slots, each was 20s)
+	switch networkMagic {
+	case 764824073: // mainnet
 		shelleyEpoch := epoch - ShelleyStartEpoch
-		return 4492800 + uint64(shelleyEpoch)*MainnetEpochLength
+		return uint64(ShelleyStartEpoch)*ByronEpochLength + uint64(shelleyEpoch)*MainnetEpochLength
+	case 1: // preprod
+		if epoch < PreprodShelleyStartEpoch {
+			return uint64(epoch) * ByronEpochLength
+		}
+		return uint64(PreprodShelleyStartEpoch)*ByronEpochLength +
+			uint64(epoch-PreprodShelleyStartEpoch)*MainnetEpochLength
+	case 2: // preview — no Byron era
+		return uint64(epoch) * PreviewEpochLength
+	default:
+		return uint64(epoch) * MainnetEpochLength
 	}
-	// Preview/preprod - epochs start from 0
-	epochLength := uint64(MainnetEpochLength)
-	if networkMagic == 2 { // preview
-		epochLength = PreviewEpochLength
-	}
-	return uint64(epoch) * epochLength
 }
 
 // GetEpochLength returns the epoch length for a network
