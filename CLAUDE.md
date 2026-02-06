@@ -63,7 +63,7 @@ Constants defined in `leaderlog.go`: `MainnetNetworkMagic`, `PreprodNetworkMagic
 ### Slot-to-Time Conversion
 `makeSlotToTime(networkMagic)` in `main.go` returns a closure handling:
 - **Mainnet**: Shelley genesis 2020-07-29T21:44:51Z, Byron slots at 20s, Shelley slots at 1s
-- **Preprod**: Genesis 2022-04-01T00:00:00Z, Byron slots at 20s (4 epochs), Shelley at 1s
+- **Preprod**: Genesis 2022-06-01T00:00:00Z, Byron slots at 20s (4 epochs), Shelley at 1s
 - **Preview**: Genesis 2022-11-01T00:00:00Z, all slots at 1s (no Byron era)
 
 ### Data Sources
