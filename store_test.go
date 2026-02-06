@@ -20,15 +20,21 @@ func TestInsertBlock(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	err := store.InsertBlock(ctx, 100, 1, "abc123", []byte{1, 2, 3}, []byte{4, 5, 6})
+	inserted, err := store.InsertBlock(ctx, 100, 1, "abc123", []byte{1, 2, 3}, []byte{4, 5, 6})
 	if err != nil {
 		t.Fatalf("InsertBlock: %v", err)
 	}
+	if !inserted {
+		t.Fatal("expected first insert to return inserted=true")
+	}
 
-	// Duplicate insert should not error (ON CONFLICT DO NOTHING)
-	err = store.InsertBlock(ctx, 100, 1, "abc123", []byte{1, 2, 3}, []byte{4, 5, 6})
+	// Duplicate insert should not error (ON CONFLICT DO NOTHING), but returns inserted=false
+	inserted, err = store.InsertBlock(ctx, 100, 1, "abc123", []byte{1, 2, 3}, []byte{4, 5, 6})
 	if err != nil {
 		t.Fatalf("InsertBlock duplicate: %v", err)
+	}
+	if inserted {
+		t.Fatal("expected duplicate insert to return inserted=false")
 	}
 }
 
@@ -46,9 +52,9 @@ func TestGetLastSyncedSlot(t *testing.T) {
 	}
 
 	// Insert some blocks
-	store.InsertBlock(ctx, 100, 1, "hash1", []byte{1}, []byte{2})
-	store.InsertBlock(ctx, 200, 1, "hash2", []byte{3}, []byte{4})
-	store.InsertBlock(ctx, 150, 1, "hash3", []byte{5}, []byte{6})
+	_, _ = store.InsertBlock(ctx, 100, 1, "hash1", []byte{1}, []byte{2})
+	_, _ = store.InsertBlock(ctx, 200, 1, "hash2", []byte{3}, []byte{4})
+	_, _ = store.InsertBlock(ctx, 150, 1, "hash3", []byte{5}, []byte{6})
 
 	slot, err = store.GetLastSyncedSlot(ctx)
 	if err != nil {

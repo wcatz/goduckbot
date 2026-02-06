@@ -11,15 +11,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// BlockData holds block information for batch processing during chain sync.
+type BlockData struct {
+	Slot      uint64
+	Epoch     int
+	BlockHash string
+	VrfOutput []byte
+}
+
 // Store is the database abstraction layer for goduckbot.
 // Both SQLite and PostgreSQL backends implement this interface.
 type Store interface {
-	InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) error
+	InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) (bool, error)
+	InsertBlockBatch(ctx context.Context, blocks []BlockData) error
 	UpsertEvolvingNonce(ctx context.Context, epoch int, nonce []byte, blockCount int) error
 	SetCandidateNonce(ctx context.Context, epoch int, nonce []byte) error
 	SetFinalNonce(ctx context.Context, epoch int, nonce []byte, source string) error
 	GetFinalNonce(ctx context.Context, epoch int) ([]byte, error)
 	GetEvolvingNonce(ctx context.Context, epoch int) ([]byte, int, error)
+	GetBlockHash(ctx context.Context, slot uint64) (string, error)
 	InsertLeaderSchedule(ctx context.Context, schedule *LeaderSchedule) error
 	IsSchedulePosted(ctx context.Context, epoch int) bool
 	MarkSchedulePosted(ctx context.Context, epoch int) error
@@ -95,14 +105,21 @@ func (s *SqliteStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *SqliteStore) InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) error {
-	_, err := s.db.ExecContext(ctx,
+func (s *SqliteStore) InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (slot) DO NOTHING`,
 		int64(slot), epoch, blockHash, vrfOutput, nonceValue,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 func (s *SqliteStore) UpsertEvolvingNonce(ctx context.Context, epoch int, nonce []byte, blockCount int) error {
@@ -238,4 +255,40 @@ func (s *SqliteStore) GetLastSyncedSlot(ctx context.Context) (uint64, error) {
 		return 0, nil
 	}
 	return uint64(*slot), nil
+}
+
+func (s *SqliteStore) GetBlockHash(ctx context.Context, slot uint64) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT block_hash FROM blocks WHERE slot = ?`,
+		int64(slot),
+	).Scan(&hash)
+	return hash, err
+}
+
+func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (slot) DO NOTHING`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, b := range blocks {
+		nonceValue := vrfNonceValue(b.VrfOutput)
+		if _, err := stmt.ExecContext(ctx, int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue); err != nil {
+			return fmt.Errorf("insert slot %d: %w", b.Slot, err)
+		}
+	}
+
+	return tx.Commit()
 }
