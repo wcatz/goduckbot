@@ -8,49 +8,64 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	koios "github.com/cardano-community/koios-go-client/v3"
 	"golang.org/x/crypto/blake2b"
 )
+
+// ShelleyGenesisHash is the hash of the Shelley genesis block on mainnet.
+// Used as the initial eta_v seed for full chain sync nonce evolution.
+const ShelleyGenesisHash = "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81"
 
 // NonceTracker accumulates VRF nonce contributions from chain sync blocks
 // and evolves the epoch nonce for leader schedule calculation.
 type NonceTracker struct {
 	mu             sync.Mutex
-	db             *pgxpool.Pool
+	store          Store
 	koiosClient    *koios.Client
 	evolvingNonce  []byte // current eta_v (32 bytes)
 	currentEpoch   int
 	blockCount     int
 	candidateFroze bool // whether candidate nonce was frozen this epoch
 	networkMagic   int
+	fullMode       bool // true = genesis-seeded rolling nonce, false = lite (zero-seeded)
 }
 
 // NewNonceTracker creates a NonceTracker and attempts to restore state from DB.
-func NewNonceTracker(db *pgxpool.Pool, koiosClient *koios.Client, epoch, networkMagic int) *NonceTracker {
+// In full mode, the initial nonce is seeded with the Shelley genesis hash.
+// In lite mode, the initial nonce is zero (current behavior).
+func NewNonceTracker(store Store, koiosClient *koios.Client, epoch, networkMagic int, fullMode bool) *NonceTracker {
 	nt := &NonceTracker{
-		db:           db,
+		store:        store,
 		koiosClient:  koiosClient,
 		currentEpoch: epoch,
 		networkMagic: networkMagic,
+		fullMode:     fullMode,
 	}
 
 	// Try to restore evolving nonce from DB for current epoch
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	nonce, blockCount, err := GetEvolvingNonce(ctx, db, epoch)
+	nonce, blockCount, err := store.GetEvolvingNonce(ctx, epoch)
 	if err == nil && nonce != nil {
 		nt.evolvingNonce = nonce
 		nt.blockCount = blockCount
 		log.Printf("Restored evolving nonce for epoch %d (block count: %d)", epoch, blockCount)
 	} else {
-		// Initialize with zero nonce — will be seeded on first block or from Koios
-		nt.evolvingNonce = make([]byte, 32)
-		log.Printf("Starting fresh nonce tracking for epoch %d", epoch)
+		nt.evolvingNonce = initialNonce(fullMode)
+		log.Printf("Starting fresh nonce tracking for epoch %d (full=%v)", epoch, fullMode)
 	}
 
 	return nt
+}
+
+// initialNonce returns the initial eta_v seed based on mode.
+func initialNonce(fullMode bool) []byte {
+	if fullMode {
+		seed, _ := hex.DecodeString(ShelleyGenesisHash)
+		return seed
+	}
+	return make([]byte, 32)
 }
 
 // vrfNonceValue computes the nonce contribution from a VRF output.
@@ -85,15 +100,17 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 
 		// Try to restore evolving nonce from DB (e.g., after restart mid-epoch)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		nonce, bc, err := GetEvolvingNonce(ctx, nt.db, epoch)
+		nonce, bc, err := nt.store.GetEvolvingNonce(ctx, epoch)
 		cancel()
 		if err == nil && nonce != nil {
 			nt.evolvingNonce = nonce
 			nt.blockCount = bc
 			log.Printf("Restored evolving nonce for epoch %d from DB (block count: %d)", epoch, bc)
-		} else {
-			nt.evolvingNonce = make([]byte, 32)
 		}
+		// In full mode: eta_v rolls across epoch boundaries (no reset).
+		// In lite mode: eta_v also continues (it was zero-seeded initially).
+		// We only reset if we couldn't restore AND it's lite mode.
+		// In both cases, the nonce just continues from wherever it was.
 	}
 
 	// Compute nonce contribution
@@ -107,11 +124,11 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := InsertBlock(ctx, nt.db, slot, epoch, blockHash, vrfOutput, nonceValue); err != nil {
+	if err := nt.store.InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue); err != nil {
 		log.Printf("Failed to insert block %d: %v", slot, err)
 	}
 
-	if err := UpsertEvolvingNonce(ctx, nt.db, epoch, nt.evolvingNonce, nt.blockCount); err != nil {
+	if err := nt.store.UpsertEvolvingNonce(ctx, epoch, nt.evolvingNonce, nt.blockCount); err != nil {
 		log.Printf("Failed to upsert evolving nonce for epoch %d: %v", epoch, err)
 	}
 }
@@ -130,7 +147,7 @@ func (nt *NonceTracker) FreezeCandidate(epoch int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := SetCandidateNonce(ctx, nt.db, epoch, nt.evolvingNonce); err != nil {
+	if err := nt.store.SetCandidateNonce(ctx, epoch, nt.evolvingNonce); err != nil {
 		log.Printf("Failed to freeze candidate nonce for epoch %d: %v", epoch, err)
 	} else {
 		log.Printf("Froze candidate nonce for epoch %d (block count: %d)", epoch, nt.blockCount)
@@ -143,7 +160,7 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	defer cancel()
 
 	// Try local DB first
-	nonce, err := GetFinalNonce(ctx, nt.db, epoch)
+	nonce, err := nt.store.GetFinalNonce(ctx, epoch)
 	if err == nil && nonce != nil {
 		log.Printf("Using local nonce for epoch %d", epoch)
 		return nonce, nil
@@ -157,7 +174,7 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	}
 
 	// Cache the Koios nonce in DB
-	if storeErr := SetFinalNonce(ctx, nt.db, epoch, nonce, "koios"); storeErr != nil {
+	if storeErr := nt.store.SetFinalNonce(ctx, epoch, nonce, "koios"); storeErr != nil {
 		log.Printf("Failed to cache Koios nonce for epoch %d: %v", epoch, storeErr)
 	}
 
