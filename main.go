@@ -9,6 +9,7 @@ import (
         "io"
         "log"
         "net/http"
+        "net/url"
         "os"
         "strconv"
         "sync"
@@ -242,8 +243,14 @@ func (i *Indexer) Start() error {
                         }
                 }
 
-                connString := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-                        dbUser, dbPassword, dbHost, dbPort, dbName)
+                connURL := &url.URL{
+                        Scheme:   "postgres",
+                        User:     url.UserPassword(dbUser, dbPassword),
+                        Host:     fmt.Sprintf("%s:%d", dbHost, dbPort),
+                        Path:     dbName,
+                        RawQuery: "sslmode=disable",
+                }
+                connString := connURL.String()
 
                 dbPool, dbErr := InitDB(connString)
                 if dbErr != nil {
