@@ -1,21 +1,72 @@
 # goduckbot - Claude Code Context
 
-Cardano stake pool notification bot with chain sync via adder. Calculates leader schedules using CPRAOS and posts to Telegram.
+Cardano stake pool notification bot with chain sync and built-in CPRAOS leaderlog calculation. Supports two modes: **lite** (adder tail + Koios fallback) and **full** (historical Shelley-to-tip sync via gouroboros NtN).
 
 ## Architecture
 
 | File | Purpose |
 |------|---------|
-| `main.go` | Core: config, chain sync pipeline, block notifications, leaderlog orchestration |
-| `leaderlog.go` | CPRAOS leader schedule calculation, VRF key parsing, epoch/slot math |
-| `nonce.go` | Nonce evolution tracker (VRF accumulation per block) |
-| `db.go` | PostgreSQL layer (blocks, epoch nonces, leader schedules) |
+| `main.go` | Core: config, chain sync pipeline, block notifications, leaderlog orchestration, mode/social toggles |
+| `leaderlog.go` | CPRAOS leader schedule calculation, VRF key parsing, epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
+| `nonce.go` | Nonce evolution tracker (VRF accumulation per block, genesis-seeded or zero-seeded) |
+| `store.go` | `Store` interface + SQLite implementation (`SqliteStore` via `modernc.org/sqlite`, pure Go, no CGO) |
+| `db.go` | PostgreSQL implementation (`PgStore` via `pgx/v5`) of the `Store` interface |
+| `sync.go` | Historical chain syncer using gouroboros NtN ChainSync protocol |
+
+## Modes
+
+### Lite Mode (default)
+- Uses blinklabs-io/adder to tail chain from tip
+- Nonce tracker zero-seeded, relies on Koios for epoch nonces when local data unavailable
+- No historical chain sync — starts tracking from first block seen after launch
+- Config: `mode: "lite"`
+
+### Full Mode
+- Historical sync from Shelley genesis using gouroboros NtN ChainSync
+- Nonce tracker seeded with Shelley genesis hash (`1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81`)
+- Skips Byron era (no VRF data), starts from last Byron block intersect point
+- Once caught up (within 120 slots of tip), transitions to adder live tail
+- Builds complete local nonce history — enables retroactive leaderlog and missed block detection
+- Config: `mode: "full"`
+
+### Intersect Points (Shelley start)
+| Network | Last Byron Slot | Block Hash |
+|---------|----------------|------------|
+| Mainnet | 4,492,799 | `f8084c61b6a238acec985b59310b6ecec49c0ab8352249afd7268da5cff2a457` |
+| Preprod | 1,598,399 | `7e16781b40ebf8b6da18f7b5e8ade855d6738095ef2f1c58c77e88b6e45997a4` |
+| Preview | Origin (no Byron) | N/A |
+
+## Store Interface
+
+Abstract database layer supporting SQLite (default) and PostgreSQL:
+
+```go
+type Store interface {
+    InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue) error
+    UpsertEvolvingNonce(ctx, epoch, nonce, blockCount) error
+    SetCandidateNonce(ctx, epoch, nonce) error
+    SetFinalNonce(ctx, epoch, nonce, source) error
+    GetFinalNonce(ctx, epoch) ([]byte, error)
+    GetEvolvingNonce(ctx, epoch) ([]byte, int, error)
+    InsertLeaderSchedule(ctx, schedule) error
+    IsSchedulePosted(ctx, epoch) bool
+    MarkSchedulePosted(ctx, epoch) error
+    GetLastSyncedSlot(ctx) (uint64, error)
+    Close() error
+}
+```
+
+- **SQLite** (`SqliteStore`): Default for Docker/standalone. Uses WAL mode, single-writer, `modernc.org/sqlite` (pure Go, CGO_ENABLED=0 compatible).
+- **PostgreSQL** (`PgStore`): For K8s deployments with CNPG. Uses `pgx/v5` connection pool.
+
+All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 
 ## Features
 - Real-time block notifications via Telegram/Twitter (with duck images)
+- Social network toggles: `telegram.enabled`, `twitter.enabled` in config
 - Chain sync using blinklabs-io/adder with auto-reconnect and host failover
 - Built-in CPRAOS leaderlog calculation (replaces cncli sidecar)
-- VRF nonce evolution tracked per block in PostgreSQL
+- VRF nonce evolution tracked per block in SQLite or PostgreSQL
 - Koios API integration for stake data and nonce fallback
 - WebSocket broadcast for block events
 - Telegram message chunking for messages >4096 chars
@@ -34,21 +85,30 @@ Is leader     = leaderValue < threshold
 ```
 
 ### Nonce Evolution
-Per block: `nonceValue = BLAKE2b-256(0x4E || vrfOutput)`, then `eta_v = BLAKE2b-256(eta_v || nonceValue)`. Candidate nonce freezes at 70% epoch progress (stability window). Koios used as fallback when local nonce unavailable.
+Per block: `nonceValue = BLAKE2b-256(0x4E || vrfOutput)`, then `eta_v = BLAKE2b-256(eta_v || nonceValue)`. Rolling eta_v accumulates across epoch boundaries (no reset). Candidate nonce freezes at 70% epoch progress (stability window). Koios used as fallback when local nonce unavailable.
 
 ### Trigger Flow
 1. Every block: extract VRF output from header, update evolving nonce
 2. At 70% epoch progress: freeze candidate nonce
 3. After freeze: calculate next epoch schedule (mutex-guarded, one goroutine per epoch)
-4. Post schedule to Telegram, store in PostgreSQL
+4. Post schedule to Telegram, store in database
 
 ### Race Condition Prevention
 `checkLeaderlogTrigger` fires on every block after 70% — uses `leaderlogMu` mutex + `leaderlogCalcing` map to ensure only one goroutine runs per epoch. Map entry is cleaned up after goroutine completes.
 
 ### VRF Extraction by Era
+
+Two extraction paths depending on sync mode:
+
+**Live tail (adder)** — `extractVrfOutput()` in `main.go`:
+- Must extract from `event.Event` payload BEFORE JSON marshal (`Block` field is `json:"-"`)
 - Conway/Babbage: `header.Body.VrfResult.Output` (combined, 64 bytes)
 - Shelley/Allegra/Mary/Alonzo: `header.Body.NonceVrf.Output` (separate)
-- Must extract from `event.Event` payload BEFORE JSON marshal (`Block` field is `json:"-"`)
+
+**Historical sync (gouroboros NtN)** — `extractVrfFromHeader()` in `sync.go`:
+- Receives `ledger.BlockHeader` directly, type-asserts to era-specific header
+- Same VRF field access pattern as adder path
+- Skips Byron blocks (no VRF data)
 
 ### Network Constants
 
@@ -66,6 +126,11 @@ Constants defined in `leaderlog.go`: `MainnetNetworkMagic`, `PreprodNetworkMagic
 - **Preprod**: Genesis 2022-06-01T00:00:00Z, Byron slots at 20s (4 epochs), Shelley at 1s
 - **Preview**: Genesis 2022-11-01T00:00:00Z, all slots at 1s (no Byron era)
 
+### Slot/Epoch Math
+- `GetEpochStartSlot(epoch, networkMagic)` — first slot of an epoch, accounts for Byron offset
+- `SlotToEpoch(slot, networkMagic)` — inverse, determines epoch from slot number
+- `GetEpochLength(networkMagic)` — returns epoch length for network
+
 ### Data Sources
 
 | Data | Source | Notes |
@@ -75,16 +140,16 @@ Constants defined in `leaderlog.go`: `MainnetNetworkMagic`, `PreprodNetworkMagic
 | Pool stake | Koios `GetPoolInfo` | `ActiveStake` is `decimal.Decimal`, use `.IntPart()` |
 | Total stake | Koios `GetEpochInfo` | `ActiveStake` is `decimal.Decimal`, use `.IntPart()` |
 
-### Database Schema (auto-created by `InitDB`)
+### Database Schema (auto-created by Store constructors)
 - `blocks` — per-block VRF data (slot, epoch, block_hash, vrf_output, nonce_value)
 - `epoch_nonces` — evolving/candidate/final nonces per epoch with source tracking
-- `leader_schedules` — calculated schedules with slots JSONB, posted flag
-
-All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
+- `leader_schedules` — calculated schedules with slots JSON, posted flag
 
 ## Config
 
 ```yaml
+mode: "lite"  # "lite" or "full"
+
 poolId: "POOL_ID_HEX"
 ticker: "TICKER"
 poolName: "Pool Name"
@@ -94,9 +159,13 @@ nodeAddress:
 networkMagic: 764824073
 
 telegram:
+  enabled: true              # toggle Telegram notifications
   channel: "CHANNEL_ID"
+  # token via TELEGRAM_TOKEN env var
+
 twitter:
-  consumer_key: "..."  # etc.
+  enabled: false             # toggle Twitter notifications
+  # credentials via env vars
 
 leaderlog:
   enabled: true
@@ -104,22 +173,29 @@ leaderlog:
   timezone: "America/New_York"
 
 database:
+  driver: "sqlite"           # "sqlite" (default) or "postgres"
+  path: "./goduckbot.db"     # SQLite file path
+  # PostgreSQL settings (driver: postgres)
   host: "postgres-host"
   port: 5432
   name: "goduckbot"
   user: "goduckbot"
-  password: ""  # Prefer GODUCKBOT_DB_PASSWORD env var
+  password: ""               # Prefer GODUCKBOT_DB_PASSWORD env var
 ```
 
 **Note:** Database password uses `net/url.URL` for URL-safe encoding in connection strings. Passwords with special characters (`@`, `:`, `/`) are handled correctly.
 
-## Helm Chart (v0.2.0)
+## Helm Chart (v0.3.0)
 
-Key values for leaderlog:
+Key values:
+- `config.mode` — "lite" (default) or "full"
+- `config.telegram.enabled` / `config.twitter.enabled` — social network toggles (env vars conditionally injected)
 - `config.leaderlog.enabled` — enables VRF tracking and schedule calculation
-- `config.database.*` — PostgreSQL connection (password via SOPS secret)
+- `config.database.driver` — "sqlite" (default) or "postgres"
+- `config.database.path` — SQLite file path (default `/data/goduckbot.db`)
+- `persistence.enabled` — creates PVC for SQLite data when `database.driver=sqlite`
 - `vrfKey.secretName` — K8s secret containing vrf.skey (auto-mounted when `leaderlog.enabled` or `vrfKey.enabled`)
-- Helm `required` validations enforce `vrfKey.secretName` and `database.password` when leaderlog is enabled
+- DB password secret only required when `leaderlog.enabled` AND `database.driver=postgres`
 
 ## Dockerfile
 
@@ -135,16 +211,30 @@ CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o goduckbot .
 docker buildx build --platform linux/amd64,linux/arm64 -t wcatz/goduckbot:latest --push .
 
 # Helm package + push
-helm package helm-chart/ --version 0.2.0
-helm push goduckbot-0.2.0.tgz oci://ghcr.io/wcatz/helm-charts
+helm package helm-chart/ --version 0.3.0
+helm push goduckbot-0.3.0.tgz oci://ghcr.io/wcatz/helm-charts
 
 # Deploy via helmfile (from infra repo)
 helmfile -e apps -l app=duckbot apply
 ```
 
+## Tests
+
+```bash
+go test ./... -v    # 16 tests: store, nonce, leaderlog
+go vet ./...
+helm lint helm-chart/
+```
+
+Test files:
+- `store_test.go` — SQLite Store operations (in-memory `:memory:` DB)
+- `nonce_test.go` — VRF nonce hashing, nonce evolution, genesis seed
+- `leaderlog_test.go` — SlotToEpoch (all networks), round-trip, formatNumber
+
 ## Key Dependencies
-- `blinklabs-io/adder` v0.37.0 — chain sync (must match gouroboros version)
-- `blinklabs-io/gouroboros` v0.153.0 — VRF, block headers, ledger types
+- `blinklabs-io/adder` v0.37.0 — live chain tail (must match gouroboros version)
+- `blinklabs-io/gouroboros` v0.153.0 — VRF, block headers, ledger types, NtN ChainSync
+- `modernc.org/sqlite` — pure Go SQLite (no CGO required)
 - `jackc/pgx/v5` — PostgreSQL driver
 - `cardano-community/koios-go-client/v3` — Koios API
 - `golang.org/x/crypto` — blake2b hashing
