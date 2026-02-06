@@ -439,13 +439,24 @@ func (i *Indexer) Start() error {
 	return i.startAdderPipeline()
 }
 
-// flushBlockBatch processes a batch of blocks through the nonce tracker.
-// Nonce evolution is order-dependent, so blocks are processed sequentially.
-// ProcessBlock handles InsertBlock (with deduplication) and nonce evolution internally.
+// flushBlockBatch bulk-inserts blocks via CopyFrom and evolves nonce in-memory.
+// Falls back to individual ProcessBlock calls if CopyFrom fails (e.g., duplicates on resume).
 func (i *Indexer) flushBlockBatch(batch []BlockData) {
-	for _, b := range batch {
-		i.nonceTracker.ProcessBlock(b.Slot, b.Epoch, b.BlockHash, b.VrfOutput)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := i.store.InsertBlockBatch(ctx, batch)
+	cancel()
+
+	if err != nil {
+		// CopyFrom fails on duplicate keys — fall back to individual inserts
+		log.Printf("Batch insert failed (likely resume duplicates), falling back: %v", err)
+		for _, b := range batch {
+			i.nonceTracker.ProcessBlock(b.Slot, b.Epoch, b.BlockHash, b.VrfOutput)
+		}
+		return
 	}
+
+	// Blocks inserted via CopyFrom, evolve nonce in-memory with single DB persist
+	i.nonceTracker.ProcessBatch(batch)
 }
 
 // startAdderPipeline starts the adder pipeline for live chain tail.
