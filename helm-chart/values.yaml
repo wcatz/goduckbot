@@ -36,10 +36,10 @@ config:
   leaderlog:
     enabled: false
     vrfKeyPath: "/keys/vrf.skey"
-    timezone: "UTC"
+    timezone: ""
 
   database:
-    host: "k3s-postgres-rw.postgres.svc.cluster.local"
+    host: ""
     port: 5432
     name: "goduckbot"
     user: "goduckbot"
@@ -48,4 +48,5 @@ config:
 vrfKey:
   enabled: false
   secretName: ""
+  content: ""
   mountPath: "/keys"
