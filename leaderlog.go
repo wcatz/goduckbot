@@ -22,6 +22,11 @@ const (
 	// ActiveSlotCoeff is the probability a slot has a leader (5% on mainnet)
 	ActiveSlotCoeff = 0.05
 
+	// Network magic values
+	MainnetNetworkMagic = 764824073
+	PreprodNetworkMagic = 1
+	PreviewNetworkMagic = 2
+
 	// MainnetEpochLength is slots per epoch on mainnet and preprod
 	MainnetEpochLength = 432000
 
@@ -84,8 +89,8 @@ func ParseVRFKeyFile(path string) (*VRFKey, error) {
 	}
 
 	// CBOR hex has "5840" prefix (byte string, 64 bytes)
-	if len(envelope.CborHex) < 4 {
-		return nil, fmt.Errorf("cborHex too short")
+	if len(envelope.CborHex) < 4 || envelope.CborHex[:4] != "5840" {
+		return nil, fmt.Errorf("unexpected CBOR prefix: expected '5840', got %q", envelope.CborHex[:min(4, len(envelope.CborHex))])
 	}
 
 	// Strip CBOR prefix and decode
@@ -147,6 +152,10 @@ func calculateThreshold(poolStake, totalStake uint64, f float64) *big.Int {
 
 // IsSlotLeaderCpraos checks if pool is leader for slot using CPRAOS algorithm
 func IsSlotLeaderCpraos(slot uint64, epochNonce []byte, vrfKey *VRFKey, poolStake, totalStake uint64) (bool, error) {
+	if vrfKey == nil {
+		return false, fmt.Errorf("nil VRF key")
+	}
+
 	// Step 1: Create VRF input
 	vrfInput := mkInputVrf(slot, epochNonce)
 
@@ -182,6 +191,9 @@ func CalculateLeaderSchedule(
 
 	if len(epochNonce) != 32 {
 		return nil, fmt.Errorf("epoch nonce must be 32 bytes, got %d", len(epochNonce))
+	}
+	if totalStake == 0 {
+		return nil, fmt.Errorf("totalStake must be non-zero")
 	}
 
 	sigma := float64(poolStake) / float64(totalStake)
@@ -224,16 +236,19 @@ func CalculateLeaderSchedule(
 // Accounts for Byron era offset on mainnet and preprod.
 func GetEpochStartSlot(epoch int, networkMagic int) uint64 {
 	switch networkMagic {
-	case 764824073: // mainnet
-		shelleyEpoch := epoch - ShelleyStartEpoch
-		return uint64(ShelleyStartEpoch)*ByronEpochLength + uint64(shelleyEpoch)*MainnetEpochLength
-	case 1: // preprod
+	case MainnetNetworkMagic:
+		if epoch < ShelleyStartEpoch {
+			return uint64(epoch) * ByronEpochLength
+		}
+		return uint64(ShelleyStartEpoch)*ByronEpochLength +
+			uint64(epoch-ShelleyStartEpoch)*MainnetEpochLength
+	case PreprodNetworkMagic:
 		if epoch < PreprodShelleyStartEpoch {
 			return uint64(epoch) * ByronEpochLength
 		}
 		return uint64(PreprodShelleyStartEpoch)*ByronEpochLength +
 			uint64(epoch-PreprodShelleyStartEpoch)*MainnetEpochLength
-	case 2: // preview — no Byron era
+	case PreviewNetworkMagic:
 		return uint64(epoch) * PreviewEpochLength
 	default:
 		return uint64(epoch) * MainnetEpochLength
@@ -242,7 +257,7 @@ func GetEpochStartSlot(epoch int, networkMagic int) uint64 {
 
 // GetEpochLength returns the epoch length for a network
 func GetEpochLength(networkMagic int) uint64 {
-	if networkMagic == 2 { // preview
+	if networkMagic == PreviewNetworkMagic {
 		return PreviewEpochLength
 	}
 	return MainnetEpochLength

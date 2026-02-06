@@ -81,7 +81,7 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
-            {{- if .Values.vrfKey.enabled }}
+            {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
             - name: vrf-key
               mountPath: {{ .Values.vrfKey.mountPath }}
               readOnly: true
@@ -93,9 +93,9 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
-        {{- if .Values.vrfKey.enabled }}
+        {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
         - name: vrf-key
           secret:
-            secretName: {{ .Values.vrfKey.secretName }}
+            secretName: {{ required "vrfKey.secretName is required when leaderlog or vrfKey is enabled" .Values.vrfKey.secretName }}
         {{- end }}
       restartPolicy: Always
