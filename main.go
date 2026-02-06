@@ -19,10 +19,14 @@ import (
         "github.com/blinklabs-io/adder/input/chainsync"
         output_embedded "github.com/blinklabs-io/adder/output/embedded"
         "github.com/blinklabs-io/adder/pipeline"
+        "github.com/blinklabs-io/gouroboros/ledger/babbage"
+        "github.com/blinklabs-io/gouroboros/ledger/conway"
+        "github.com/blinklabs-io/gouroboros/ledger/shelley"
         "github.com/btcsuite/btcutil/bech32"
         koios "github.com/cardano-community/koios-go-client/v3"
         "github.com/cenkalti/backoff/v4"
         "github.com/gorilla/websocket"
+        "github.com/jackc/pgx/v5/pgxpool"
         "github.com/michimani/gotwi"
         "github.com/michimani/gotwi/tweet/managetweet"
         "github.com/michimani/gotwi/tweet/managetweet/types"
@@ -76,6 +80,12 @@ type Indexer struct {
         // Twitter fields
         twitterClient  *gotwi.Client
         twitterEnabled bool
+        // Leaderlog fields
+        vrfKey           *VRFKey
+        leaderlogEnabled bool
+        leaderlogTZ      string
+        db               *pgxpool.Pool
+        nonceTracker     *NonceTracker
 }
 
 type BlockEvent struct {
@@ -201,6 +211,46 @@ func (i *Indexer) Start() error {
         i.epoch = getCurrentEpoch()
         fmt.Println("Epoch: ", i.epoch)
 
+        // Initialize leaderlog if enabled
+        i.leaderlogEnabled = viper.GetBool("leaderlog.enabled")
+        i.leaderlogTZ = viper.GetString("leaderlog.timezone")
+        if i.leaderlogTZ == "" {
+                i.leaderlogTZ = "UTC"
+        }
+
+        if i.leaderlogEnabled {
+                vrfKeyPath := viper.GetString("leaderlog.vrfKeyPath")
+                vrfKey, vrfErr := ParseVRFKeyFile(vrfKeyPath)
+                if vrfErr != nil {
+                        log.Fatalf("failed to parse VRF key from %s: %s", vrfKeyPath, vrfErr)
+                }
+                i.vrfKey = vrfKey
+                log.Printf("Leaderlog enabled, VRF key loaded from %s", vrfKeyPath)
+
+                // Connect to PostgreSQL
+                dbHost := viper.GetString("database.host")
+                dbPort := viper.GetInt("database.port")
+                dbName := viper.GetString("database.name")
+                dbUser := viper.GetString("database.user")
+                dbPassword := os.Getenv("GODUCKBOT_DB_PASSWORD")
+                if dbPassword == "" {
+                        dbPassword = viper.GetString("database.password")
+                }
+
+                connString := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+                        dbUser, dbPassword, dbHost, dbPort, dbName)
+
+                dbPool, dbErr := InitDB(connString)
+                if dbErr != nil {
+                        log.Fatalf("failed to connect to database: %s", dbErr)
+                }
+                i.db = dbPool
+
+                // Initialize nonce tracker
+                i.nonceTracker = NewNonceTracker(i.db, i.koios, i.epoch, i.networkMagic)
+                log.Println("Nonce tracker initialized")
+        }
+
         // Convert the poolId to Bech32
         bech32PoolId, err := convertToBech32(i.poolId)
         if err != nil {
@@ -233,17 +283,8 @@ func (i *Indexer) Start() error {
         } else {
                 log.Fatalf("failed to get pool lifetime blocks: %s", err)
         }
-        channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
-        if err != nil {
-                log.Fatalf("failed to parse telegram channel ID: %s", err)
-        }
-        initMessage := fmt.Sprintf("duckBot initiated!\n\n %s\n Epoch: %d\n Epoch Blocks: %d\n\n Lifetime Blocks: %d\n\n Quack Will Robinson, QUACK!",
+        log.Printf("duckBot started: %s | Epoch: %d | Epoch Blocks: %d | Lifetime Blocks: %d",
                 i.poolName, i.epoch, i.epochBlocks, i.totalBlocks)
-
-        _, err = i.bot.Send(&telebot.Chat{ID: channelID}, initMessage)
-        if err != nil {
-                log.Printf("failed to send Telegram message: %s", err)
-        }
 
         // Try each host with exponential backoff
         hosts := i.nodeAddresses
@@ -300,9 +341,17 @@ func (i *Indexer) Start() error {
 
 }
 
-func (i *Indexer) handleEvent(event event.Event) error {
+func (i *Indexer) handleEvent(evt event.Event) error {
+        // Extract VRF output before JSON marshal (Block field is json:"-")
+        var vrfOutput []byte
+        if i.leaderlogEnabled {
+                if be, ok := evt.Payload.(event.BlockEvent); ok && be.Block != nil {
+                        vrfOutput = extractVrfOutput(be.Block.Header())
+                }
+        }
+
         // Marshal the event to JSON
-        data, err := json.Marshal(event)
+        data, err := json.Marshal(evt)
         if err != nil {
                 return fmt.Errorf("error marshalling event: %v", err)
         }
@@ -365,6 +414,17 @@ func (i *Indexer) handleEvent(event event.Event) error {
         if currentEpoch != i.epoch {
                 i.epoch = currentEpoch
                 i.epochBlocks = 0
+        }
+
+        // Track VRF data for nonce evolution
+        if i.leaderlogEnabled && vrfOutput != nil {
+                i.nonceTracker.ProcessBlock(
+                        blockEvent.Context.SlotNumber,
+                        i.epoch,
+                        blockEvent.Payload.BlockHash,
+                        vrfOutput,
+                )
+                i.checkLeaderlogTrigger(blockEvent.Context.SlotNumber)
         }
 
         // If the block event is from the pool, process it
@@ -542,6 +602,192 @@ func convertToBech32(hash string) (string, error) {
                 return "", err
         }
         return bech32Str, nil
+}
+
+// extractVrfOutput extracts the VRF output from a block header.
+// Returns the raw VRF output bytes, or nil if extraction fails.
+func extractVrfOutput(header interface{}) []byte {
+        switch h := header.(type) {
+        case *conway.ConwayBlockHeader:
+                return h.Body.VrfResult.Output
+        case *babbage.BabbageBlockHeader:
+                return h.Body.VrfResult.Output
+        case *shelley.ShelleyBlockHeader:
+                // Pre-Babbage eras have separate nonce VRF
+                return h.Body.NonceVrf.Output
+        default:
+                log.Printf("Unsupported block header type for VRF extraction: %T", header)
+                return nil
+        }
+}
+
+// getEpochProgress returns the percentage progress through the current epoch based on slot position.
+func (i *Indexer) getEpochProgress(slot uint64) float64 {
+        epochStartSlot := GetEpochStartSlot(i.epoch, i.networkMagic)
+        epochLen := GetEpochLength(i.networkMagic)
+        if epochLen == 0 {
+                return 0
+        }
+        return float64(slot-epochStartSlot) / float64(epochLen) * 100
+}
+
+// checkLeaderlogTrigger checks if we should calculate the leader schedule.
+// Triggers at >=70% epoch progress (stability window passed).
+func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
+        progress := i.getEpochProgress(slot)
+
+        // Freeze candidate nonce at stability window
+        if progress >= 70.0 {
+                i.nonceTracker.FreezeCandidate(i.epoch)
+        }
+
+        // Calculate leader schedule for current epoch at epoch start,
+        // or for next epoch after stability window
+        nextEpoch := i.epoch + 1
+        if progress >= 70.0 && !IsSchedulePosted(context.Background(), i.db, nextEpoch) {
+                go i.calculateAndPostLeaderlog(nextEpoch)
+        }
+}
+
+// calculateAndPostLeaderlog calculates the leader schedule and posts to Telegram.
+func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
+        log.Printf("Calculating leader schedule for epoch %d...", epoch)
+
+        // Wait a bit for data to settle
+        time.Sleep(30 * time.Second)
+
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+        defer cancel()
+
+        // Get epoch nonce (local first, Koios fallback)
+        epochNonce, err := i.nonceTracker.GetNonceForEpoch(epoch)
+        if err != nil {
+                log.Printf("Failed to get nonce for epoch %d: %v", epoch, err)
+                return
+        }
+
+        // Get pool stake from Koios
+        poolInfo, err := i.koios.GetPoolInfo(ctx, koios.PoolID(i.bech32PoolId), nil)
+        if err != nil {
+                log.Printf("Failed to get pool info for leaderlog: %v", err)
+                return
+        }
+        if poolInfo.Data == nil {
+                log.Printf("No pool info returned for leaderlog")
+                return
+        }
+        poolStake := uint64(poolInfo.Data.ActiveStake.IntPart())
+
+        // Get total active stake from Koios
+        epochNo := koios.EpochNo(epoch)
+        epochInfo, err := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+        if err != nil {
+                log.Printf("Failed to get epoch info for leaderlog: %v", err)
+                return
+        }
+        if len(epochInfo.Data) == 0 {
+                log.Printf("No epoch info returned for epoch %d", epoch)
+                return
+        }
+        totalStake := uint64(epochInfo.Data[0].ActiveStake.IntPart())
+
+        if poolStake == 0 || totalStake == 0 {
+                log.Printf("Invalid stake values: pool=%d, total=%d", poolStake, totalStake)
+                return
+        }
+
+        // Calculate schedule
+        epochLength := GetEpochLength(i.networkMagic)
+        epochStartSlot := GetEpochStartSlot(epoch, i.networkMagic)
+        slotToTimeFn := makeSlotToTime(i.networkMagic)
+
+        schedule, err := CalculateLeaderSchedule(
+                epoch, epochNonce, i.vrfKey,
+                poolStake, totalStake,
+                epochLength, epochStartSlot, slotToTimeFn,
+        )
+        if err != nil {
+                log.Printf("Failed to calculate leader schedule for epoch %d: %v", epoch, err)
+                return
+        }
+
+        log.Printf("Epoch %d: %d slots assigned (expected %.2f)",
+                epoch, len(schedule.AssignedSlots), schedule.IdealSlots)
+
+        // Store in database
+        if err := InsertLeaderSchedule(ctx, i.db, schedule); err != nil {
+                log.Printf("Failed to store leader schedule: %v", err)
+        }
+
+        // Format and post to Telegram
+        msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ)
+
+        channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
+        if err != nil {
+                log.Printf("Failed to parse telegram channel ID: %v", err)
+                return
+        }
+
+        _, err = i.bot.Send(&telebot.Chat{ID: channelID}, msg)
+        if err != nil {
+                log.Printf("Failed to send leaderlog to Telegram: %v", err)
+                return
+        }
+
+        // Mark as posted
+        if err := MarkSchedulePosted(ctx, i.db, epoch); err != nil {
+                log.Printf("Failed to mark schedule as posted: %v", err)
+        }
+
+        log.Printf("Leader schedule for epoch %d posted to Telegram", epoch)
+}
+
+// makeSlotToTime returns a function that converts a slot number to a time.Time.
+func makeSlotToTime(networkMagic int) func(uint64) time.Time {
+        shelleyStart, _ := time.Parse(time.RFC3339, ShelleyEpochStart)
+
+        if networkMagic == 764824073 { // mainnet
+                // Shelley started at slot 4492800
+                return func(slot uint64) time.Time {
+                        return shelleyStart.Add(time.Duration(int64(slot)-4492800) * time.Second)
+                }
+        }
+
+        // Preview/preprod — slot 0 starts at network genesis
+        // Preview: 2022-11-01T00:00:00Z, Preprod: 2022-04-01T00:00:00Z
+        var genesis time.Time
+        switch networkMagic {
+        case 2: // preview
+                genesis, _ = time.Parse(time.RFC3339, "2022-11-01T00:00:00Z")
+        case 1: // preprod
+                genesis, _ = time.Parse(time.RFC3339, "2022-04-01T00:00:00Z")
+        default:
+                genesis = shelleyStart
+        }
+
+        return func(slot uint64) time.Time {
+                return genesis.Add(time.Duration(slot) * time.Second)
+        }
+}
+
+// formatNumber formats an integer with comma separators (e.g., 1234567 -> "1,234,567").
+func formatNumber(n int64) string {
+        if n < 0 {
+                return "-" + formatNumber(-n)
+        }
+        s := strconv.FormatInt(n, 10)
+        if len(s) <= 3 {
+                return s
+        }
+
+        result := make([]byte, 0, len(s)+(len(s)-1)/3)
+        for i, c := range s {
+                if i > 0 && (len(s)-i)%3 == 0 {
+                        result = append(result, ',')
+                }
+                result = append(result, byte(c))
+        }
+        return string(result)
 }
 
 // Main function to start the adder pipeline
