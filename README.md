@@ -167,10 +167,6 @@ Built on the shoulders of:
 - [jackc/pgx](https://github.com/jackc/pgx) — PostgreSQL driver
 - [random-d.uk](https://random-d.uk) — The ducks
 
-## Credits
-
-Early development work by [@wael](https://github.com/wael)
-
 ## License
 
 MIT
