@@ -326,7 +326,7 @@ func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone stri
 		msg += fmt.Sprintf("Schedule (%s):\n", timezone)
 		for _, slot := range schedule.AssignedSlots {
 			localTime := slot.At.In(loc)
-			msg += fmt.Sprintf("  %s - Slot %d\n", localTime.Format("01/02 15:04:05"), slot.Slot)
+			msg += fmt.Sprintf("  %s - Slot %d\n", localTime.Format("01/02 3:04:05 PM"), slot.Slot)
 		}
 	} else {
 		msg += "No slots assigned this epoch.\n"
