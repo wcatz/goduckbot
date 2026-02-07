@@ -357,6 +357,17 @@ func (i *Indexer) Start() error {
 		i.nonceTracker = NewNonceTracker(i.store, i.koios, i.epoch, i.networkMagic, fullMode)
 		i.leaderlogCalcing = make(map[int]bool)
 		log.Println("Nonce tracker initialized")
+
+		// Backfill nonce history in background
+		if fullMode {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				defer cancel()
+				if err := i.nonceTracker.BackfillNonces(ctx); err != nil {
+					log.Printf("Nonce backfill failed: %v", err)
+				}
+			}()
+		}
 	}
 
 	// Convert the poolId to Bech32
