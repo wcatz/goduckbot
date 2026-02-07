@@ -367,12 +367,8 @@ func (i *Indexer) Start() error {
 		blockCh := make(chan BlockData, 10000)
 
 		onCaughtUp := func() {
-			log.Println("Historical sync caught up, starting live tail...")
-			go func() {
-				if err := i.startAdderPipeline(); err != nil {
-					log.Printf("Failed to start adder pipeline after sync: %s", err)
-				}
-			}()
+			log.Println("Historical sync caught up, stopping ChainSyncer...")
+			syncCancel() // stop ChainSyncer so Start() returns and adder takes over
 		}
 
 		// DB writer goroutine — drains channel in batches for throughput
@@ -432,10 +428,10 @@ func (i *Indexer) Start() error {
 
 		close(blockCh)
 		<-writerDone // wait for DB writer to flush
-		return nil
+		log.Println("Historical sync complete, transitioning to live tail...")
 	}
 
-	// Lite mode (or full mode without leaderlog): start adder pipeline directly
+	// Start adder pipeline for live chain tail (both full and lite mode)
 	return i.startAdderPipeline()
 }
 
@@ -1034,24 +1030,23 @@ func formatNumber(n int64) string {
 // Main function to start the adder pipeline
 func main() {
 
-	// Start the adder pipeline
+	// Configure websocket route and start broadcast handler BEFORE Start()
+	// (Start blocks in full mode; broadcast channel must be drained)
+	http.HandleFunc("/ws", handleConnections)
+	go handleMessages()
+	go func() {
+		log.Println("http server started on :8081")
+		if err := http.ListenAndServe("localhost:8081", nil); err != nil {
+			log.Printf("ListenAndServe: %s", err)
+		}
+	}()
+
+	// Start the indexer (blocks in full mode until sync + live tail complete)
 	if err := globalIndexer.Start(); err != nil {
 		log.Fatalf("failed to start adder: %s", err)
 	}
 
-	// Configure websocket route
-	http.HandleFunc("/ws", handleConnections)
-
-	// Start listening for incoming chat messages
-	go handleMessages()
-
 	// Wait for all goroutines to finish before exiting
 	globalIndexer.wg.Wait()
-
-	// Start the server on localhost port 8080 and log any errors
-	log.Println("http server started on :8081")
-	err := http.ListenAndServe("localhost:8081", nil)
-	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
-	}
+	select {}
 }
