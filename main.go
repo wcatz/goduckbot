@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,8 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gorilla/websocket"
 	"github.com/michimani/gotwi"
+	"github.com/michimani/gotwi/media/upload"
+	upload_types "github.com/michimani/gotwi/media/upload/types"
 	"github.com/michimani/gotwi/tweet/managetweet"
 	"github.com/michimani/gotwi/tweet/managetweet/types"
 	"github.com/spf13/viper"
@@ -83,9 +86,11 @@ type Indexer struct {
 	// Mode: "lite" (adder tail + Koios) or "full" (historical sync + adder tail)
 	mode string
 	// Social network toggles
-	telegramEnabled bool
-	twitterEnabled  bool
-	twitterClient   *gotwi.Client
+	telegramEnabled    bool
+	telegramGifEnabled bool
+	twitterEnabled     bool
+	twitterGifEnabled  bool
+	twitterClient      *gotwi.Client
 	// Leaderlog fields
 	vrfKey           *VRFKey
 	leaderlogEnabled bool
@@ -210,6 +215,13 @@ func (i *Indexer) Start() error {
 		i.telegramEnabled = true
 	}
 
+	// GIF support toggle
+	i.telegramGifEnabled = viper.GetBool("telegram.gifEnabled")
+	// Default to true if not explicitly set
+	if !viper.IsSet("telegram.gifEnabled") {
+		i.telegramGifEnabled = true
+	}
+
 	// Initialize Telegram bot if enabled
 	if i.telegramEnabled {
 		var err error
@@ -230,6 +242,13 @@ func (i *Indexer) Start() error {
 	if !viper.IsSet("twitter.enabled") {
 		// Backward compatibility: enable if env vars are present
 		twitterConfigEnabled = true
+	}
+
+	// Twitter GIF support toggle
+	i.twitterGifEnabled = viper.GetBool("twitter.gifEnabled")
+	// Default to true if not explicitly set
+	if !viper.IsSet("twitter.gifEnabled") {
+		i.twitterGifEnabled = true
 	}
 
 	if twitterConfigEnabled {
@@ -642,10 +661,36 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			if err != nil {
 				log.Printf("failed to parse telegram channel ID: %s", err)
 			} else {
-				photo := &telebot.Photo{File: telebot.FromURL(duckImageURL), Caption: msg}
-				_, err = i.bot.Send(&telebot.Chat{ID: channelID}, photo)
-				if err != nil {
-					log.Printf("failed to send Telegram message: %s", err)
+				chat := &telebot.Chat{ID: channelID}
+				sentSuccessfully := false
+
+				// Try to send GIF if enabled
+				if i.telegramGifEnabled {
+					gifURL, gifErr := fetchRandomDuckGIF()
+					if gifErr == nil && gifURL != "" {
+						animation := &telebot.Animation{
+							File: telebot.FromURL(gifURL),
+							Caption: msg,
+						}
+						_, err = i.bot.Send(chat, animation)
+						if err != nil {
+							log.Printf("failed to send Telegram GIF, falling back to photo: %s", err)
+						} else {
+							// GIF sent successfully
+							sentSuccessfully = true
+						}
+					} else {
+						log.Printf("failed to fetch duck GIF, falling back to photo: %v", gifErr)
+					}
+				}
+
+				// Fallback to photo (either GIF disabled or GIF send failed)
+				if !sentSuccessfully {
+					photo := &telebot.Photo{File: telebot.FromURL(duckImageURL), Caption: msg}
+					_, err = i.bot.Send(chat, photo)
+					if err != nil {
+						log.Printf("failed to send Telegram message: %s", err)
+					}
 				}
 			}
 		}
@@ -662,7 +707,18 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				i.epochBlocks, i.totalBlocks,
 				blockEvent.Context.BlockNumber)
 
-			err = i.sendTweet(tweetMsg, duckImageURL)
+			// Fetch GIF URL if enabled, otherwise use empty string for text-only tweet
+			var gifURL string
+			if i.twitterGifEnabled {
+				fetchedGIF, gifErr := fetchRandomDuckGIF()
+				if gifErr != nil {
+					log.Printf("failed to fetch duck GIF for Twitter, posting text-only: %v", gifErr)
+				} else {
+					gifURL = fetchedGIF
+				}
+			}
+
+			err = i.sendTweet(tweetMsg, gifURL)
 			if err != nil {
 				log.Printf("failed to send tweet: %s", err)
 			}
@@ -732,6 +788,36 @@ func getDuckImage() string {
 	return imageURL
 }
 
+// fetchRandomDuckGIF fetches a random duck GIF from random-d.uk API with a timeout.
+// Returns the GIF URL or an error if the fetch fails.
+func fetchRandomDuckGIF() (string, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Get("https://random-d.uk/api/random?type=gif")
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch duck GIF: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("duck GIF API returned status %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode duck GIF response: %w", err)
+	}
+
+	gifURL, ok := result["url"].(string)
+	if !ok || gifURL == "" {
+		return "", fmt.Errorf("no GIF URL in response")
+	}
+
+	return gifURL, nil
+}
+
 // Download image from URL to bytes
 func downloadImage(imageURL string) ([]byte, error) {
 	resp, err := http.Get(imageURL)
@@ -752,8 +838,64 @@ func downloadImage(imageURL string) ([]byte, error) {
 	return imageData, nil
 }
 
-// Send tweet with optional image
-func (i *Indexer) sendTweet(text string, imageURL string) error {
+// uploadMediaToTwitter uploads media to Twitter using the chunked upload API.
+// Returns the media_id string on success, or an error.
+func (i *Indexer) uploadMediaToTwitter(mediaBytes []byte, mediaType upload_types.MediaType, mediaCategory upload_types.MediaCategory) (string, error) {
+	if !i.twitterEnabled || i.twitterClient == nil {
+		return "", fmt.Errorf("twitter client not initialized")
+	}
+
+	ctx := context.Background()
+
+	// Step 1: Initialize upload
+	initInput := &upload_types.InitializeInput{
+		MediaType:     mediaType,
+		MediaCategory: mediaCategory,
+		TotalBytes:    len(mediaBytes),
+	}
+
+	initOutput, err := upload.Initialize(ctx, i.twitterClient, initInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to initialize media upload: %w", err)
+	}
+
+	if initOutput.Data.MediaID == "" {
+		return "", fmt.Errorf("initialize returned no media ID")
+	}
+
+	mediaID := initOutput.Data.MediaID
+
+	// Step 2: Append media data (single chunk for images/GIFs)
+	appendInput := &upload_types.AppendInput{
+		MediaID:      mediaID,
+		Media:        bytes.NewReader(mediaBytes),
+		SegmentIndex: 0,
+	}
+
+	_, err = upload.Append(ctx, i.twitterClient, appendInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to append media data: %w", err)
+	}
+
+	// Step 3: Finalize upload
+	finalizeInput := &upload_types.FinalizeInput{
+		MediaID: mediaID,
+	}
+
+	finalizeOutput, err := upload.Finalize(ctx, i.twitterClient, finalizeInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to finalize media upload: %w", err)
+	}
+
+	if finalizeOutput.Data.MediaID == "" {
+		return "", fmt.Errorf("finalize returned no media ID")
+	}
+
+	return finalizeOutput.Data.MediaID, nil
+}
+
+// Send tweet with optional GIF
+func (i *Indexer) sendTweet(text string, gifURL string) error {
 	if !i.twitterEnabled || i.twitterClient == nil {
 		return nil
 	}
@@ -763,7 +905,31 @@ func (i *Indexer) sendTweet(text string, imageURL string) error {
 		Text: gotwi.String(text),
 	}
 
-	// Post the tweet
+	// If GIF URL is provided, download and upload it
+	if gifURL != "" {
+		gifBytes, err := downloadImage(gifURL)
+		if err != nil {
+			log.Printf("failed to download GIF, posting text-only tweet: %v", err)
+		} else {
+			// Upload GIF to Twitter
+			mediaID, uploadErr := i.uploadMediaToTwitter(
+				gifBytes,
+				upload_types.MediaTypeGIF,
+				upload_types.MediaCategoryTweetGIF,
+			)
+			if uploadErr != nil {
+				log.Printf("failed to upload GIF to Twitter, posting text-only tweet: %v", uploadErr)
+			} else {
+				// Attach media to tweet
+				input.Media = &types.CreateInputMedia{
+					MediaIDs: []string{mediaID},
+				}
+				log.Printf("GIF uploaded successfully, media_id: %s", mediaID)
+			}
+		}
+	}
+
+	// Post the tweet (with or without media)
 	_, err := managetweet.Create(context.Background(), i.twitterClient, input)
 	if err != nil {
 		return fmt.Errorf("failed to post tweet: %w", err)

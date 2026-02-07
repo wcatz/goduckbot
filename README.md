@@ -2,6 +2,8 @@
 
 A Cardano stake pool operator's companion. Real-time block notifications, built-in CPRAOS leader schedule calculation, and full chain nonce history — all from a single Go binary syncing directly off your local node.
 
+**Current version: v1.2.3**
+
 ```text
 Quack!(attention)
 duckBot notification!
@@ -22,13 +24,11 @@ Lifetime Blocks: 1,337
 
 **Block Notifications** — Every time your pool mints a block, duckBot fires off a notification to Telegram (with a random duck pic) and optionally Twitter/X. Includes tx count, block size, fill percentage, interval since last block, and running epoch/lifetime tallies.
 
-**Leader Schedule Calculation** — Built-in CPRAOS implementation calculates your upcoming slot assignments without needing cncli as a sidecar. Validated against cncli on both preview and mainnet. Posts the full schedule to Telegram with local timezone support and message chunking for large schedules.
+**Leader Schedule Calculation** — Built-in CPRAOS implementation calculates your upcoming slot assignments for all 432K slots per epoch without needing cncli. VRF-based leadership checking validated against real mainnet data (epoch 500: 19/19 match). Posts the full schedule to Telegram with local timezone support and message chunking for large schedules.
 
-**Full Chain Nonce History** — In full mode, syncs every block from Shelley genesis using gouroboros NtN ChainSync, building a complete local nonce evolution history. Enables retroactive leaderlog calculation and missed block detection. In lite mode, tails the chain from tip and falls back to Koios when needed.
+**Full Chain Nonce History** — In full mode, syncs every block from Shelley genesis using gouroboros NtN ChainSync protocol, building a complete local nonce evolution history. Supports all Cardano eras (Shelley/Allegra/Mary/Alonzo/Babbage/Conway) with era-specific VRF extraction. Processes ~3,300 blocks/sec. Enables retroactive leaderlog calculation and missed block detection.
 
-**Nonce Evolution** — Tracks the evolving nonce per-block by accumulating VRF outputs through BLAKE2b-256 hashing. Freezes the candidate nonce at the stability window (70% epoch progress), then triggers leader schedule calculation for the next epoch.
-
-**WebSocket Feed** — Broadcasts all block events over WebSocket for custom integrations and dashboards.
+**Dual Database Support** — SQLite (pure Go, no CGO) for development and single-node deployments. PostgreSQL with pgx CopyFrom batch writes for production environments.
 
 **Node Failover** — Supports multiple node addresses with exponential backoff retry. If the primary goes down, duckBot rolls over to the backup.
 
@@ -36,19 +36,21 @@ Lifetime Blocks: 1,337
 
 | Mode | Description |
 | ---- | ----------- |
-| **lite** (default) | Tails chain from tip via adder. Uses Koios API for epoch nonces. No historical data. |
-| **full** | Historical sync from Shelley genesis via gouroboros NtN. Builds complete local nonce history. Transitions to live tail once caught up. |
+| **lite** (default) | Tails chain from tip via adder. Uses Koios API for epoch nonces and stake snapshots. No historical sync. Fast startup. |
+| **full** | Historical sync from Shelley genesis via gouroboros NtN ChainSync. Builds complete local nonce history with per-block VRF accumulation. Transitions to live tail once caught up. Requires database (sqlite or postgres). |
 
 ## Architecture
 
+Single binary Go app, all code in root package.
+
 | File           | What It Does                                                                |
 | -------------- | --------------------------------------------------------------------------- |
-| `main.go`      | Config, chain sync (adder), block notifications, leaderlog, mode/social toggles |
-| `leaderlog.go` | CPRAOS schedule math, VRF key parsing, epoch/slot calculations              |
-| `nonce.go`     | Nonce evolution: VRF accumulation, candidate freeze, genesis-seeded or zero-seeded |
+| `main.go`      | Config, chain sync (adder), block notifications, leaderlog orchestration, mode/social toggles |
+| `leaderlog.go` | CPRAOS schedule math, VRF key parsing, epoch/slot calculations, all 432K slots per epoch |
+| `nonce.go`     | Nonce evolution: per-block VRF accumulation via BLAKE2b-256, candidate freeze at stability window |
 | `store.go`     | Store interface + SQLite implementation (default, pure Go, no CGO)          |
-| `db.go`        | PostgreSQL implementation of the Store interface                            |
-| `sync.go`      | Historical chain syncer using gouroboros NtN ChainSync protocol             |
+| `db.go`        | PostgreSQL implementation of Store interface with pgx CopyFrom batch writes |
+| `sync.go`      | Historical chain syncer using gouroboros NtN ChainSync, all eras (Shelley→Conway) |
 
 ## Quick Start
 
@@ -139,12 +141,11 @@ SQLite is the default database — no external database required. Data persists 
 
 ## Helm Chart
 
-duckBot ships with a Helm chart (v0.3.0) for Kubernetes deployments.
+duckBot ships with a Helm chart for Kubernetes deployments.
 
 ```bash
-# Package and push
-helm package helm-chart/ --version 0.3.0
-helm push goduckbot-0.3.0.tgz oci://ghcr.io/wcatz/helm-charts
+# Install from OCI registry
+helm install goduckbot oci://ghcr.io/wcatz/helm-charts/goduckbot
 
 # Deploy via helmfile
 helmfile -e apps -l app=duckbot apply
@@ -154,7 +155,7 @@ Key chart values:
 
 - `config.mode` — "lite" (default) or "full"
 - `config.telegram.enabled` / `config.twitter.enabled` — social network toggles
-- `config.leaderlog.enabled` — enable VRF tracking and schedule calculation
+- `config.leaderlog.enabled` — enable CPRAOS schedule calculation
 - `config.database.driver` — "sqlite" (default) or "postgres"
 - `persistence.enabled` — PVC for SQLite data (when using sqlite driver)
 - `vrfKey.secretName` — K8s secret containing your `vrf.skey`
@@ -184,10 +185,16 @@ Where `f` = active slot coefficient (0.05), `sigma` = pool's relative stake, and
 ## Tests
 
 ```bash
-go test ./... -v    # 16 tests covering store, nonce, and leaderlog
+go test ./... -v    # Tests covering store, nonce, and leaderlog
 go vet ./...
 helm lint helm-chart/
 ```
+
+Test coverage includes:
+- SQLite store operations (insert, query, batch writes)
+- CPRAOS VRF calculations and slot assignments
+- Nonce evolution and candidate freezing
+- Epoch boundary calculations
 
 ## Dependencies
 
