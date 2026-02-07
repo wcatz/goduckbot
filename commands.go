@@ -26,6 +26,7 @@ func (i *Indexer) registerCommands() {
 	i.bot.Handle("/blocks", i.cmdBlocks)
 	i.bot.Handle("/ping", i.cmdPing)
 	i.bot.Handle("/duck", i.cmdDuck)
+	i.bot.Handle("/nextblock", i.cmdNextBlock)
 	log.Println("Bot commands registered")
 }
 
@@ -55,6 +56,7 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"/tip \u2014 Current chain tip\n" +
 		"/epoch \u2014 Current epoch info\n" +
 		"/leaderlog [next|current|epoch] \u2014 Leader schedule\n" +
+		"/nextblock \u2014 Next scheduled block slot & time\n" +
 		"/nonce [next|current] \u2014 Epoch nonce\n" +
 		"/validate <hash> \u2014 Check block on-chain\n" +
 		"/stake \u2014 Pool & network stake\n" +
@@ -278,7 +280,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	// Check for stored schedule first
@@ -435,7 +437,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
@@ -538,4 +540,84 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 	url := getDuckImage()
 	photo := &telebot.Photo{File: telebot.FromURL(url)}
 	i.bot.Send(m.Chat, photo)
+}
+
+func (i *Indexer) cmdNextBlock(m *telebot.Message) {
+	if !i.isAllowed(m) {
+		return
+	}
+
+	if !i.leaderlogEnabled {
+		i.bot.Send(m.Chat, "Leaderlog not enabled")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Get current epoch
+	currentEpoch := getCurrentEpoch()
+
+	// Get leader schedule for current epoch
+	schedule, err := i.store.GetLeaderSchedule(ctx, currentEpoch)
+	if err != nil {
+		i.bot.Send(m.Chat, fmt.Sprintf("No leader schedule found for epoch %d.\nRun /leaderlog current first.", currentEpoch))
+		return
+	}
+
+	if len(schedule.AssignedSlots) == 0 {
+		i.bot.Send(m.Chat, "No blocks scheduled this epoch")
+		return
+	}
+
+	// Find the next slot that hasn't passed yet
+	now := time.Now().UTC()
+	var nextSlot *LeaderSlot
+
+	for idx := range schedule.AssignedSlots {
+		slot := &schedule.AssignedSlots[idx]
+		if slot.At.After(now) {
+			nextSlot = slot
+			break
+		}
+	}
+
+	if nextSlot == nil {
+		i.bot.Send(m.Chat, "No more blocks scheduled this epoch")
+		return
+	}
+
+	// Load timezone for display
+	loc, err := time.LoadLocation(i.leaderlogTZ)
+	if err != nil {
+		loc = time.UTC
+	}
+
+	// Calculate time remaining
+	timeUntil := time.Until(nextSlot.At)
+	hours := int(timeUntil.Hours())
+	minutes := int(timeUntil.Minutes()) % 60
+	seconds := int(timeUntil.Seconds()) % 60
+
+	// Format countdown
+	var countdown string
+	if hours > 0 {
+		countdown = fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+	} else if minutes > 0 {
+		countdown = fmt.Sprintf("%dm %ds", minutes, seconds)
+	} else {
+		countdown = fmt.Sprintf("%ds", seconds)
+	}
+
+	localTime := nextSlot.At.In(loc)
+
+	msg := fmt.Sprintf("\U0001F4C5 Next Scheduled Block\n\n"+
+		"Slot: %d\n"+
+		"Time: %s\n"+
+		"Countdown: %s\n",
+		nextSlot.Slot,
+		localTime.Format("01/02/2006 03:04:05 PM MST"),
+		countdown)
+
+	i.bot.Send(m.Chat, msg)
 }
