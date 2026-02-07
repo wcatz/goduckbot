@@ -250,21 +250,20 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	}
 
 	// Get stake from node — mark for next epoch, set for current
-	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx, snapType)
+	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
 	if err != nil {
-		reply(fmt.Sprintf("Failed to get stake distribution: %v", err))
+		reply(fmt.Sprintf("Failed to get stake snapshots: %v", err))
 		return
 	}
 
-	poolStake, ok := stakeDist[i.bech32PoolId]
-	if !ok {
-		reply(fmt.Sprintf("Pool %s not found in stake distribution", i.bech32PoolId))
-		return
-	}
-
-	var totalStake uint64
-	for _, s := range stakeDist {
-		totalStake += s
+	var poolStake, totalStake uint64
+	switch snapType {
+	case SnapshotSet:
+		poolStake = snapshots.PoolStakeSet
+		totalStake = snapshots.TotalStakeSet
+	default:
+		poolStake = snapshots.PoolStakeMark
+		totalStake = snapshots.TotalStakeMark
 	}
 	if totalStake == 0 {
 		reply("Total stake is zero")
@@ -379,37 +378,24 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx, SnapshotMark)
+	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Error querying stake: %v", err))
 		return
 	}
 
-	poolStake, ok := stakeDist[i.bech32PoolId]
-	if !ok {
-		i.bot.Send(m.Chat, fmt.Sprintf("Pool %s not found in live stake distribution", i.bech32PoolId))
-		return
-	}
-
-	var totalStake uint64
-	for _, s := range stakeDist {
-		totalStake += s
-	}
-
-	if totalStake == 0 {
+	if snapshots.TotalStakeMark == 0 {
 		i.bot.Send(m.Chat, "Total network stake is zero")
 		return
 	}
 
-	sigma := float64(poolStake) / float64(totalStake)
-	poolADA := int64(poolStake / 1_000_000)
-	totalADA := int64(totalStake / 1_000_000)
+	sigma := float64(snapshots.PoolStakeMark) / float64(snapshots.TotalStakeMark)
 
 	msg := fmt.Sprintf("\U0001F4B0 Stake Info (mark snapshot)\n\n"+
-		"Pool: %s ADA\n"+
-		"Network: %s ADA\n"+
+		"Pool: %s\u20B3\n"+
+		"Network: %s\u20B3\n"+
 		"Sigma: %.10f\n",
-		formatNumber(poolADA), formatNumber(totalADA), sigma)
+		formatNumber(int64(snapshots.PoolStakeMark)), formatNumber(int64(snapshots.TotalStakeMark)), sigma)
 
 	i.bot.Send(m.Chat, msg)
 }

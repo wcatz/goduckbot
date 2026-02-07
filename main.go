@@ -1059,30 +1059,18 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 		return
 	}
 
-	// Get pool stake from Koios
-	poolInfo, err := i.koios.GetPoolInfo(ctx, koios.PoolID(i.bech32PoolId), nil)
+	// Get pool + network stake from node (mark snapshot for next epoch)
+	if i.nodeQuery == nil {
+		log.Printf("Node query not configured, cannot calculate leaderlog")
+		return
+	}
+	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
 	if err != nil {
-		log.Printf("Failed to get pool info for leaderlog: %v", err)
+		log.Printf("Failed to get stake snapshots for leaderlog: %v", err)
 		return
 	}
-	if poolInfo.Data == nil {
-		log.Printf("No pool info returned for leaderlog")
-		return
-	}
-	poolStake := uint64(poolInfo.Data.ActiveStake.IntPart())
-
-	// Get total active stake from Koios
-	epochNo := koios.EpochNo(epoch)
-	epochInfo, err := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-	if err != nil {
-		log.Printf("Failed to get epoch info for leaderlog: %v", err)
-		return
-	}
-	if len(epochInfo.Data) == 0 {
-		log.Printf("No epoch info returned for epoch %d", epoch)
-		return
-	}
-	totalStake := uint64(epochInfo.Data[0].ActiveStake.IntPart())
+	poolStake := snapshots.PoolStakeMark
+	totalStake := snapshots.TotalStakeMark
 
 	if poolStake == 0 || totalStake == 0 {
 		log.Printf("Invalid stake values: pool=%d, total=%d", poolStake, totalStake)
