@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -20,11 +21,33 @@ type NodeQueryClient struct {
 }
 
 // NewNodeQueryClient creates a new node query client.
+// nodeAddress can be a TCP address ("host:port"), a UNIX socket path ("/ipc/node.socket"),
+// or explicitly prefixed ("unix:///ipc/node.socket", "tcp://host:port").
 func NewNodeQueryClient(nodeAddress string, networkMagic int) *NodeQueryClient {
 	return &NodeQueryClient{
 		nodeAddress:  nodeAddress,
 		networkMagic: uint32(networkMagic),
 	}
+}
+
+// parseNodeAddress detects protocol from the address string.
+// Returns (network, address) for gouroboros Dial.
+//
+//	"/ipc/node.socket"          → ("unix", "/ipc/node.socket")
+//	"unix:///ipc/node.socket"   → ("unix", "/ipc/node.socket")
+//	"tcp://host:3001"           → ("tcp", "host:3001")
+//	"host:3001"                 → ("tcp", "host:3001")
+func parseNodeAddress(addr string) (string, string) {
+	if strings.HasPrefix(addr, "unix://") {
+		return "unix", strings.TrimPrefix(addr, "unix://")
+	}
+	if strings.HasPrefix(addr, "/") || strings.HasSuffix(addr, ".socket") || strings.HasSuffix(addr, ".sock") {
+		return "unix", addr
+	}
+	if strings.HasPrefix(addr, "tcp://") {
+		return "tcp", strings.TrimPrefix(addr, "tcp://")
+	}
+	return "tcp", addr
 }
 
 func (c *NodeQueryClient) Close() error {
@@ -55,8 +78,9 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 		}
 		defer conn.Close()
 
-		if err := conn.Dial("tcp", c.nodeAddress); err != nil {
-			ch <- result{fmt.Errorf("dialing %s: %w", c.nodeAddress, err)}
+		network, address := parseNodeAddress(c.nodeAddress)
+		if err := conn.Dial(network, address); err != nil {
+			ch <- result{fmt.Errorf("dialing %s://%s: %w", network, address, err)}
 			return
 		}
 

@@ -9,9 +9,14 @@ poolId: "YOUR_POOL_ID"
 ticker: "TICKER"
 poolName: "Pool Name"
 nodeAddress:
-  host1: "YOUR_CARDANO_NODE_ADDRESS_1:3001"   # NtN (chain sync)
-  host2: "YOUR_CARDANO_NODE_ADDRESS_2:3001"   # NtN (optional failover)
-  ntcHost: "YOUR_CARDANO_NODE_ADDRESS_1:30000" # NtC (local state queries via socat)
+  # Docker Compose (UNIX socket — recommended):
+  host1: "cardano-node:3001"            # NtN (chain sync)
+  ntcHost: "/ipc/node.socket"           # NtC (direct UNIX socket)
+
+  # Remote node (TCP via socat bridge):
+  # host1: "your-node:3001"             # NtN (chain sync)
+  # host2: "backup-node:3001"           # NtN (optional failover)
+  # ntcHost: "your-node:30000"          # NtC (via socat TCP bridge)
 
 networkMagic: 764824073  # mainnet. preprod is 1, preview is 2 and sancho is 4.
 
@@ -34,10 +39,10 @@ leaderlog:
 
 # Database configuration (only used when leaderlog.enabled is true)
 database:
-  driver: "sqlite"          # "sqlite" (default) or "postgres"
-  path: "./goduckbot.db"    # SQLite file path (only used with driver: sqlite)
+  driver: "sqlite"              # "sqlite" (default) or "postgres"
+  path: "/app/data/goduckbot.db" # SQLite path (use /app/data/ for docker volume)
   # PostgreSQL settings (only used with driver: postgres)
-  host: "localhost"
+  host: "postgres"              # "postgres" for docker-compose, or your DB host
   port: 5432
   name: "goduckbot"
   user: "goduckbot"

@@ -1,0 +1,42 @@
+services:
+  goduckbot:
+    image: wcatz/goduckbot:${GODUCKBOT_VERSION:-latest}
+    container_name: goduckbot
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TWITTER_API_KEY=${TWITTER_API_KEY:-}
+      - TWITTER_API_KEY_SECRET=${TWITTER_API_KEY_SECRET:-}
+      - TWITTER_ACCESS_TOKEN=${TWITTER_ACCESS_TOKEN:-}
+      - TWITTER_ACCESS_TOKEN_SECRET=${TWITTER_ACCESS_TOKEN_SECRET:-}
+      - GODUCKBOT_DB_PASSWORD=${GODUCKBOT_DB_PASSWORD:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./keys:/keys:ro
+      - goduckbot-data:/app/data
+      # Full mode: bind-mount the node's socket directory
+      # - /opt/cardano/ipc:/ipc:ro
+
+  # Optional: PostgreSQL instead of SQLite
+  # Enable with: docker compose --profile postgres up -d
+  postgres:
+    image: postgres:16-alpine
+    container_name: goduckbot-postgres
+    restart: unless-stopped
+    profiles:
+      - postgres
+    environment:
+      - POSTGRES_DB=goduckbot
+      - POSTGRES_USER=goduckbot
+      - POSTGRES_PASSWORD=${GODUCKBOT_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goduckbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  goduckbot-data:
+  postgres-data:

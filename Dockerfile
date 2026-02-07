@@ -29,6 +29,6 @@ LABEL org.opencontainers.image.title="goduckbot" \
 
 WORKDIR /app
 COPY --from=builder /app/goduckbot /app/goduckbot
-# Add runtime dependencies if needed
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/data /ipc /keys
 CMD ["/app/goduckbot"]

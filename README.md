@@ -1,8 +1,10 @@
 # duckBot
 
+We call it duckBot. There is no better name, and the day is coming soon when it will be unleashed.
+
 A zero-dependency Cardano stake pool companion. Block notifications, CPRAOS leader schedule, epoch nonces, and stake queries — all from a single Go binary talking directly to your node via [gouroboros](https://github.com/blinklabs-io/gouroboros). No cncli. No Ogmios. No external APIs.
 
-**Current version: v2.3.3**
+**Current version: v2.3.5**
 
 ## Why duckBot?
 
@@ -22,9 +24,11 @@ Most SPO tooling depends on a stack: cncli for leader schedule, Ogmios or db-syn
 
 **Leader Schedule** — Full CPRAOS implementation checks all 432,000 slots per epoch against your VRF key. No cncli required. Calculates next epoch schedule automatically at the stability window (60% into epoch). Supports on-demand `/leaderlog <epoch>` for any historical epoch.
 
-**Direct Node Queries** — Talks to your cardano-node via NtC local state query protocol (through a socat TCP bridge on port 30000). Gets stake snapshots (mark/set/go), chain tip, and epoch number directly from the ledger — no middleware.
+**Direct Node Queries** — Talks to your cardano-node via NtC local state query protocol. Connects directly via UNIX socket (docker-compose) or through a socat TCP bridge for remote nodes. Gets stake snapshots (mark/set/go), chain tip, and epoch number directly from the ledger — no middleware.
 
 **Self-Computed Nonces** — In full mode, streams every block from Shelley genesis, extracting VRF outputs per era (Shelley through Conway), evolving the nonce via BLAKE2b-256, and freezing at the stability window. Backfills the entire nonce history (~400 epochs) in under 2 minutes. Zero external dependency for nonce data.
+
+**Historical Data** — Stores every block header, leader schedule, epoch nonce, and stake snapshot in PostgreSQL or SQLite. Query any past epoch's schedule with `/leaderlog <epoch>`, validate historical blocks with `/validate <hash>`, or look up nonces with `/nonce`. Full audit trail for missed block analysis and performance tracking.
 
 **Node Failover** — Supports multiple node addresses with exponential backoff retry. If the primary goes down, duckBot rolls over to the backup.
 
@@ -55,24 +59,32 @@ Most SPO tooling depends on a stack: cncli for leader schedule, Ogmios or db-syn
 
 duckBot uses two Ouroboros protocols to talk to your cardano-node:
 
-| Protocol | Port | Purpose |
-| -------- | ---- | ------- |
-| **NtN** (node-to-node) | 3001 | ChainSync — real-time block streaming and historical sync |
-| **NtC** (node-to-client) | 30000 | Local state query — stake snapshots, chain tip, epoch |
+| Protocol | Purpose |
+| -------- | ------- |
+| **NtN** (node-to-node) | ChainSync — real-time block streaming and historical sync |
+| **NtC** (node-to-client) | Local state query — stake snapshots, chain tip, epoch |
 
-NtC requires a TCP bridge to the node's UNIX socket. Most setups use a socat sidecar:
+NtC supports two connection methods:
+
+**UNIX socket (recommended)** — Direct connection to the node's socket. Used by docker-compose with a shared volume. No socat needed.
+
+```yaml
+nodeAddress:
+  host1: "cardano-node:3001"         # NtN (chain sync)
+  ntcHost: "/ipc/node.socket"        # NtC (direct UNIX socket)
+```
+
+**TCP via socat** — For remote nodes or Kubernetes. Bridges the UNIX socket to a TCP port:
 
 ```bash
 socat TCP-LISTEN:30000,fork UNIX-CLIENT:/ipc/node.socket,ignoreeof
 ```
 
-Configure both in your `config.yaml`:
-
 ```yaml
 nodeAddress:
-  host1: "your-node:3001"      # NtN (chain sync)
-  host2: "backup-node:3001"    # NtN (optional failover)
-  ntcHost: "your-node:30000"   # NtC (local state queries)
+  host1: "your-node:3001"            # NtN (chain sync)
+  host2: "backup-node:3001"          # NtN (optional failover)
+  ntcHost: "your-node:30000"         # NtC (via socat TCP bridge)
 ```
 
 ## Quick Start
@@ -80,7 +92,7 @@ nodeAddress:
 ### Prerequisites
 
 - Go 1.24+
-- Access to a Cardano node (NtN port 3001, NtC port 30000)
+- Access to a Cardano node (NtN port 3001; NtC via UNIX socket or socat for full mode)
 - Telegram bot token and channel
 - Your pool's `vrf.skey` (for leader schedule)
 
@@ -150,6 +162,21 @@ docker build -t goduckbot .
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t wcatz/goduckbot:latest --push .
 ```
+
+## Docker Compose
+
+```bash
+cp .env.example .env        # set TELEGRAM_TOKEN
+cp config.yaml.example config.yaml
+# edit config.yaml: set poolId, ticker, host1, mode
+docker compose up -d
+```
+
+**Lite mode** — Point `host1` at any remote node's NtN port (3001). Koios handles stake and nonces. That's it.
+
+**Full mode** — Run duckBot on the same machine as your node. Uncomment the socket bind-mount in `docker-compose.yaml` and set `ntcHost: "/ipc/node.socket"` in config. Everything computed locally, zero external APIs.
+
+**PostgreSQL** — `docker compose --profile postgres up -d`
 
 ## Helm Chart
 
