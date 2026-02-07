@@ -35,6 +35,14 @@ func (i *Indexer) isAllowed(m *telebot.Message) bool {
 	return ok
 }
 
+func (i *Indexer) requireOgmios(m *telebot.Message) bool {
+	if i.ogmios == nil {
+		i.bot.Send(m.Chat, "Ogmios not configured")
+		return false
+	}
+	return true
+}
+
 func (i *Indexer) cmdHelp(m *telebot.Message) {
 	if !i.isAllowed(m) {
 		return
@@ -73,6 +81,11 @@ func (i *Indexer) cmdStatus(m *telebot.Message) {
 		"Mode: %s\n",
 		lastSlot, i.epoch, i.mode)
 
+	if i.ogmios == nil {
+		i.bot.Send(m.Chat, msg)
+		return
+	}
+
 	tipSlot, _, tipEpoch, tipErr := i.ogmios.QueryTip(ctx)
 	if tipErr == nil {
 		distance := int64(tipSlot) - int64(lastSlot)
@@ -92,7 +105,7 @@ func (i *Indexer) cmdStatus(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdTip(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isAllowed(m) || !i.requireOgmios(m) {
 		return
 	}
 
@@ -121,7 +134,7 @@ func (i *Indexer) cmdTip(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdEpoch(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isAllowed(m) || !i.requireOgmios(m) {
 		return
 	}
 
@@ -136,6 +149,9 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 	tipSlot, _, _, tipErr := i.ogmios.QueryTip(ctx)
 	if tipErr == nil && tipSlot >= epochStart {
 		slotsIntoEpoch = tipSlot - epochStart
+	}
+	if slotsIntoEpoch > epochLen {
+		slotsIntoEpoch = epochLen
 	}
 
 	slotsRemaining := epochLen - slotsIntoEpoch
@@ -197,25 +213,36 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
+	if !i.requireOgmios(m) {
+		return
+	}
+
 	// Calculate live — send progress message
-	sent, _ := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
+	sent, sendErr := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
+	reply := func(text string) {
+		if sendErr == nil {
+			i.bot.Edit(sent, text)
+		} else {
+			i.bot.Send(m.Chat, text)
+		}
+	}
 
 	epochNonce, err := i.nonceTracker.GetNonceForEpoch(targetEpoch)
 	if err != nil {
-		i.bot.Edit(sent, fmt.Sprintf("Failed to get nonce for epoch %d: %v", targetEpoch, err))
+		reply(fmt.Sprintf("Failed to get nonce for epoch %d: %v", targetEpoch, err))
 		return
 	}
 
 	// Get stake from Ogmios live distribution (mark snapshot)
 	stakeDist, err := i.ogmios.QueryStakeDistribution(ctx)
 	if err != nil {
-		i.bot.Edit(sent, fmt.Sprintf("Failed to get stake distribution: %v", err))
+		reply(fmt.Sprintf("Failed to get stake distribution: %v", err))
 		return
 	}
 
 	poolStake, ok := stakeDist[i.bech32PoolId]
 	if !ok {
-		i.bot.Edit(sent, fmt.Sprintf("Pool %s not found in stake distribution", i.bech32PoolId))
+		reply(fmt.Sprintf("Pool %s not found in stake distribution", i.bech32PoolId))
 		return
 	}
 
@@ -224,7 +251,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		totalStake += s
 	}
 	if totalStake == 0 {
-		i.bot.Edit(sent, "Total stake is zero")
+		reply("Total stake is zero")
 		return
 	}
 
@@ -238,7 +265,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		epochLength, epochStartSlot, slotToTimeFn,
 	)
 	if err != nil {
-		i.bot.Edit(sent, fmt.Sprintf("Failed to calculate schedule: %v", err))
+		reply(fmt.Sprintf("Failed to calculate schedule: %v", err))
 		return
 	}
 
@@ -247,7 +274,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	}
 
 	msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ)
-	i.bot.Edit(sent, msg)
+	reply(msg)
 }
 
 func (i *Indexer) cmdNonce(m *telebot.Message) {
@@ -329,7 +356,7 @@ func (i *Indexer) cmdValidate(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdStake(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isAllowed(m) || !i.requireOgmios(m) {
 		return
 	}
 
@@ -409,7 +436,7 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdPing(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isAllowed(m) || !i.requireOgmios(m) {
 		return
 	}
 

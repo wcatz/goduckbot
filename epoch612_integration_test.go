@@ -15,7 +15,7 @@ import (
 func TestEpoch612LeaderSchedule(t *testing.T) {
 	dbPass := os.Getenv("GODUCKBOT_DB_PASSWORD")
 	if dbPass == "" {
-		t.Fatal("GODUCKBOT_DB_PASSWORD required")
+		t.Skip("GODUCKBOT_DB_PASSWORD not set, skipping integration test")
 	}
 	dbHost := os.Getenv("DB_HOST")
 	if dbHost == "" {
@@ -92,10 +92,10 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 		etaV = evolveNonce(etaV, nonceValue)
 		blockCount++
 
-		// Freeze candidate at 60% stability window (4k/f = 259200 slots into epoch)
+		// Freeze candidate at 60% stability window
 		if !candidateFrozen {
 			epochStart := GetEpochStartSlot(epoch, MainnetNetworkMagic)
-			stabilitySlot := epochStart + 259200
+			stabilitySlot := epochStart + StabilityWindowSlots(MainnetNetworkMagic)
 			if slot >= stabilitySlot {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
