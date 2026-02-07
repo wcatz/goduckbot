@@ -416,6 +416,10 @@ func (i *Indexer) Start() error {
 			)
 
 			if err := i.syncer.Start(syncCtx); err != nil {
+				if syncCtx.Err() != nil {
+					// Context canceled by onCaughtUp — sync is done
+					break
+				}
 				log.Printf("Historical sync error (attempt %d/%d): %s", attempt, maxRetries, err)
 				if attempt < maxRetries {
 					time.Sleep(time.Duration(attempt) * 5 * time.Second)
