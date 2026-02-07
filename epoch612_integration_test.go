@@ -57,7 +57,7 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	log.Printf("Streaming blocks from Shelley genesis to compute epoch nonces...")
 
 	rows, err := store.pool.Query(ctx,
-		"SELECT epoch, slot, nonce_value FROM blocks ORDER BY slot ASC")
+		"SELECT epoch, slot, nonce_value FROM blocks WHERE epoch <= 611 ORDER BY slot ASC")
 	if err != nil {
 		t.Fatalf("Failed to query blocks: %v", err)
 	}
@@ -158,7 +158,10 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	totalElapsed := time.Since(overallStart)
 
 	// === Results ===
-	loc, _ := time.LoadLocation("America/New_York")
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		loc = time.UTC
+	}
 	fmt.Println("\n=== Epoch 612 Leader Schedule (OTG / Star Forge) ===")
 	fmt.Printf("Epoch Nonce:     %s\n", hex.EncodeToString(epoch612Nonce))
 	fmt.Printf("Pool Stake:      %d lovelace (%.2f ADA)\n", poolStake, float64(poolStake)/1e6)
