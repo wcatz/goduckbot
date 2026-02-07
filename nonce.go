@@ -197,7 +197,10 @@ func (nt *NonceTracker) FreezeCandidate(epoch int) {
 	}
 }
 
-// GetNonceForEpoch returns the epoch nonce, trying local DB first then Koios fallback.
+// GetNonceForEpoch returns the epoch nonce. Priority:
+// 1. Local DB final_nonce cache
+// 2. Compute from chain data (full mode only)
+// 3. Koios fallback (lite mode)
 func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -205,12 +208,30 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	// Try local DB first
 	nonce, err := nt.store.GetFinalNonce(ctx, epoch)
 	if err == nil && nonce != nil {
-		log.Printf("Using local nonce for epoch %d", epoch)
+		log.Printf("Using cached nonce for epoch %d", epoch)
 		return nonce, nil
 	}
 
-	// Fallback to Koios
-	log.Printf("Local nonce not available for epoch %d, falling back to Koios", epoch)
+	// Full mode: compute from chain data
+	if nt.fullMode {
+		log.Printf("Computing epoch %d nonce from chain data...", epoch)
+		computeCtx, computeCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer computeCancel()
+		nonce, err = nt.ComputeEpochNonce(computeCtx, epoch)
+		if err == nil {
+			// Cache computed nonce
+			cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cacheCancel()
+			if storeErr := nt.store.SetFinalNonce(cacheCtx, epoch, nonce, "computed"); storeErr != nil {
+				log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
+			}
+			return nonce, nil
+		}
+		log.Printf("Failed to compute nonce for epoch %d: %v, trying Koios fallback", epoch, err)
+	}
+
+	// Koios fallback (lite mode or computation failure)
+	log.Printf("Falling back to Koios for epoch %d nonce", epoch)
 	nonce, err = nt.fetchNonceFromKoios(ctx, epoch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce for epoch %d: %w", epoch, err)
@@ -222,6 +243,94 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	}
 
 	return nonce, nil
+}
+
+// ComputeEpochNonce computes the epoch nonce for targetEpoch entirely from local chain data.
+// Streams all blocks from Shelley genesis, evolving the nonce and freezing at the
+// stability window (60%) of each epoch, then computing epoch_nonce = hash(eta_c || eta_0).
+func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) ([]byte, error) {
+	shelleyStart := ShelleyStartEpoch
+	if nt.networkMagic == PreprodNetworkMagic {
+		shelleyStart = PreprodShelleyStartEpoch
+	}
+	if targetEpoch <= shelleyStart {
+		return nil, fmt.Errorf("cannot compute nonce for epoch %d (shelley starts at %d)", targetEpoch, shelleyStart)
+	}
+
+	genesisHash, _ := hex.DecodeString(ShelleyGenesisHash)
+	etaV := make([]byte, 32)
+	copy(etaV, genesisHash)
+	eta0 := make([]byte, 32) // eta_0(shelleyStart) = shelley genesis hash
+	copy(eta0, genesisHash)
+	etaC := make([]byte, 32)
+
+	currentEpoch := shelleyStart
+	candidateFrozen := false
+
+	rows, err := nt.store.StreamBlockNonces(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("streaming blocks: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		epoch, slot, nonceValue, err := rows.Scan()
+		if err != nil {
+			return nil, fmt.Errorf("scanning block: %w", err)
+		}
+
+		// Epoch transition
+		if epoch != currentEpoch {
+			if !candidateFrozen {
+				etaC = make([]byte, 32)
+				copy(etaC, etaV)
+			}
+			// eta_0(new) = hash(eta_c(old) || eta_0(old))
+			h, _ := blake2b.New256(nil)
+			h.Write(etaC)
+			h.Write(eta0)
+			eta0 = h.Sum(nil)
+
+			// If we just transitioned INTO the target epoch, we have eta_0(target)
+			if epoch == targetEpoch {
+				rows.Close()
+				log.Printf("Computed nonce for epoch %d: %s", targetEpoch, hex.EncodeToString(eta0))
+				return eta0, nil
+			}
+
+			currentEpoch = epoch
+			candidateFrozen = false
+		}
+
+		// Evolve eta_v
+		etaV = evolveNonce(etaV, nonceValue)
+
+		// Freeze candidate at stability window
+		if !candidateFrozen {
+			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlots(nt.networkMagic)
+			if slot >= stabilitySlot {
+				etaC = make([]byte, 32)
+				copy(etaC, etaV)
+				candidateFrozen = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration: %w", err)
+	}
+
+	// If we processed all blocks and target is next epoch (not yet started)
+	if !candidateFrozen {
+		etaC = make([]byte, 32)
+		copy(etaC, etaV)
+	}
+	h, _ := blake2b.New256(nil)
+	h.Write(etaC)
+	h.Write(eta0)
+	result := h.Sum(nil)
+	log.Printf("Computed nonce for epoch %d: %s", targetEpoch, hex.EncodeToString(result))
+	return result, nil
 }
 
 // fetchNonceFromKoios fetches the epoch nonce from Koios API.

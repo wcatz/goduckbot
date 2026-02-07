@@ -19,6 +19,14 @@ type BlockData struct {
 	VrfOutput []byte
 }
 
+// BlockNonceRows is an iterator over blocks for nonce computation.
+type BlockNonceRows interface {
+	Next() bool
+	Scan() (epoch int, slot uint64, nonceValue []byte, err error)
+	Close()
+	Err() error
+}
+
 // Store is the database abstraction layer for goduckbot.
 // Both SQLite and PostgreSQL backends implement this interface.
 type Store interface {
@@ -30,11 +38,21 @@ type Store interface {
 	GetFinalNonce(ctx context.Context, epoch int) ([]byte, error)
 	GetEvolvingNonce(ctx context.Context, epoch int) ([]byte, int, error)
 	GetBlockHash(ctx context.Context, slot uint64) (string, error)
+	GetBlockByHash(ctx context.Context, hashPrefix string) ([]BlockRecord, error)
 	InsertLeaderSchedule(ctx context.Context, schedule *LeaderSchedule) error
+	GetLeaderSchedule(ctx context.Context, epoch int) (*LeaderSchedule, error)
 	IsSchedulePosted(ctx context.Context, epoch int) bool
 	MarkSchedulePosted(ctx context.Context, epoch int) error
 	GetLastSyncedSlot(ctx context.Context) (uint64, error)
+	StreamBlockNonces(ctx context.Context) (BlockNonceRows, error)
 	Close() error
+}
+
+// BlockRecord holds a block's on-chain data for validation queries.
+type BlockRecord struct {
+	Slot      uint64
+	Epoch     int
+	BlockHash string
 }
 
 // SqliteStore implements Store using SQLite via modernc.org/sqlite (pure Go, no CGO).
@@ -291,4 +309,122 @@ func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) 
 	}
 
 	return tx.Commit()
+}
+
+func (s *SqliteStore) StreamBlockNonces(ctx context.Context) (BlockNonceRows, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT epoch, slot, nonce_value FROM blocks ORDER BY slot`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &sqliteBlockNonceRows{rows: rows}, nil
+}
+
+func (s *SqliteStore) GetBlockByHash(ctx context.Context, hashPrefix string) ([]BlockRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT slot, epoch, block_hash FROM blocks WHERE block_hash LIKE ? ORDER BY slot`,
+		hashPrefix+"%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []BlockRecord
+	for rows.Next() {
+		var r BlockRecord
+		var slotInt64 int64
+		if err := rows.Scan(&slotInt64, &r.Epoch, &r.BlockHash); err != nil {
+			return nil, err
+		}
+		r.Slot = uint64(slotInt64)
+		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s *SqliteStore) GetLeaderSchedule(ctx context.Context, epoch int) (*LeaderSchedule, error) {
+	var (
+		poolStake       int64
+		totalStake      int64
+		epochNonce      string
+		sigma           float64
+		idealSlots      float64
+		slotsJSON       string
+		calculatedAtStr string
+	)
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT pool_stake, total_stake, epoch_nonce, sigma, ideal_slots, slots, calculated_at
+		 FROM leader_schedules WHERE epoch = ?`,
+		epoch,
+	).Scan(&poolStake, &totalStake, &epochNonce, &sigma, &idealSlots, &slotsJSON, &calculatedAtStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var slots []LeaderSlot
+	if err := json.Unmarshal([]byte(slotsJSON), &slots); err != nil {
+		return nil, fmt.Errorf("unmarshaling slots: %w", err)
+	}
+
+	calculatedAt, err := time.Parse(time.RFC3339, calculatedAtStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing calculated_at: %w", err)
+	}
+
+	return &LeaderSchedule{
+		Epoch:         epoch,
+		EpochNonce:    epochNonce,
+		PoolStake:     uint64(poolStake),
+		TotalStake:    uint64(totalStake),
+		Sigma:         sigma,
+		IdealSlots:    idealSlots,
+		AssignedSlots: slots,
+		CalculatedAt:  calculatedAt,
+	}, nil
+}
+
+// sqliteBlockNonceRows wraps sql.Rows to implement BlockNonceRows.
+type sqliteBlockNonceRows struct {
+	rows   *sql.Rows
+	epoch  int
+	slot   uint64
+	nonce  []byte
+	err    error
+	closed bool
+}
+
+func (r *sqliteBlockNonceRows) Next() bool {
+	if r.closed {
+		return false
+	}
+	if !r.rows.Next() {
+		r.err = r.rows.Err()
+		r.closed = true
+		return false
+	}
+	var slotInt64 int64
+	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce)
+	r.slot = uint64(slotInt64)
+	return r.err == nil
+}
+
+func (r *sqliteBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, err error) {
+	return r.epoch, r.slot, r.nonce, r.err
+}
+
+func (r *sqliteBlockNonceRows) Close() {
+	if !r.closed {
+		r.rows.Close()
+		r.closed = true
+	}
+}
+
+func (r *sqliteBlockNonceRows) Err() error {
+	return r.err
 }

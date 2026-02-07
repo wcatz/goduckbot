@@ -91,6 +91,9 @@ type Indexer struct {
 	twitterEnabled     bool
 	twitterGifEnabled  bool
 	twitterClient      *gotwi.Client
+	// Bot command access control
+	allowedUsers map[int64]bool
+	ogmios       *OgmiosClient
 	// Leaderlog fields
 	vrfKey           *VRFKey
 	leaderlogEnabled bool
@@ -233,8 +236,24 @@ func (i *Indexer) Start() error {
 			log.Fatalf("failed to start bot: %s", err)
 		}
 		log.Println("Telegram bot initialized")
+
+		// Load allowed user IDs for bot commands
+		i.allowedUsers = make(map[int64]bool)
+		for _, id := range viper.GetIntSlice("telegram.allowedUsers") {
+			i.allowedUsers[int64(id)] = true
+		}
+		if len(i.allowedUsers) > 0 {
+			log.Printf("Bot commands enabled for %d user(s)", len(i.allowedUsers))
+		}
 	} else {
 		log.Println("Telegram notifications disabled")
+	}
+
+	// Initialize Ogmios client
+	ogmiosURL := viper.GetString("ogmios.url")
+	if ogmiosURL != "" {
+		i.ogmios = NewOgmiosClient(ogmiosURL)
+		log.Printf("Ogmios client initialized: %s", ogmiosURL)
 	}
 
 	// Twitter toggle
@@ -375,6 +394,12 @@ func (i *Indexer) Start() error {
 	}
 	log.Printf("duckBot started: %s | Epoch: %d | Epoch Blocks: %d | Lifetime Blocks: %d | Mode: %s",
 		i.poolName, i.epoch, i.epochBlocks, i.totalBlocks, i.mode)
+
+	// Register bot commands and start polling
+	if i.telegramEnabled && i.bot != nil && len(i.allowedUsers) > 0 {
+		i.registerCommands()
+		go i.bot.Start()
+	}
 
 	// Full mode: run historical sync before starting adder pipeline
 	if i.mode == "full" && i.leaderlogEnabled && len(i.nodeAddresses) > 0 {
@@ -990,18 +1015,20 @@ func (i *Indexer) getEpochProgress(slot uint64) float64 {
 }
 
 // checkLeaderlogTrigger checks if we should calculate the leader schedule.
-// Triggers at >=70% epoch progress (stability window passed).
+// Triggers when slot passes the stability window (60% of epoch = 259200 slots on mainnet).
 func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
-	progress := i.getEpochProgress(slot)
+	epochStartSlot := GetEpochStartSlot(i.epoch, i.networkMagic)
+	stabilitySlot := epochStartSlot + StabilityWindowSlots(i.networkMagic)
+	pastStability := slot >= stabilitySlot
 
 	// Freeze candidate nonce at stability window
-	if progress >= 70.0 {
+	if pastStability {
 		i.nonceTracker.FreezeCandidate(i.epoch)
 	}
 
 	// Calculate leader schedule for next epoch after stability window
 	nextEpoch := i.epoch + 1
-	if progress >= 70.0 {
+	if pastStability {
 		i.leaderlogMu.Lock()
 		if i.leaderlogCalcing[nextEpoch] {
 			i.leaderlogMu.Unlock()
