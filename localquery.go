@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -42,6 +43,11 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 			ouroboros.WithNetworkMagic(c.networkMagic),
 			ouroboros.WithNodeToNode(false),
 			ouroboros.WithKeepAlive(false),
+			ouroboros.WithLocalStateQueryConfig(
+				localstatequery.NewConfig(
+					localstatequery.WithQueryTimeout(10*time.Minute),
+				),
+			),
 		)
 		if err != nil {
 			ch <- result{fmt.Errorf("creating connection: %w", err)}
