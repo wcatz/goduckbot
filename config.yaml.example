@@ -24,6 +24,8 @@ telegram:
   enabled: true  # set to false to disable Telegram notifications
   gifEnabled: true  # set to false to send photos instead of GIFs
   channel: "YOUR_TELEGRAM_CHANNEL_ID"
+  allowedUsers: []     # Admin user IDs (full access to all commands)
+  allowedGroups: []    # Group IDs where safe commands are allowed (e.g. [-1001234567890])
   # token via TELEGRAM_TOKEN env var
 
 twitter:

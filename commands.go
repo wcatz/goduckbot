@@ -30,11 +30,25 @@ func (i *Indexer) registerCommands() {
 	log.Println("Bot commands registered")
 }
 
+// isAllowed checks if the sender is an admin user (has access to all commands).
 func (i *Indexer) isAllowed(m *telebot.Message) bool {
 	if m.Sender == nil {
 		return false
 	}
 	_, ok := i.allowedUsers[int64(m.Sender.ID)]
+	return ok
+}
+
+// isGroupAllowed checks if the message came from an allowed group or an admin user.
+// Used for safe, non-sensitive commands that any group member can use.
+func (i *Indexer) isGroupAllowed(m *telebot.Message) bool {
+	if i.isAllowed(m) {
+		return true
+	}
+	if m.Chat == nil {
+		return false
+	}
+	_, ok := i.allowedGroups[m.Chat.ID]
 	return ok
 }
 
@@ -47,7 +61,7 @@ func (i *Indexer) requireNodeQuery(m *telebot.Message) bool {
 }
 
 func (i *Indexer) cmdHelp(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isGroupAllowed(m) {
 		return
 	}
 	msg := "\U0001F986 duckBot Commands\n\n" +
@@ -67,7 +81,7 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdStatus(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isGroupAllowed(m) {
 		return
 	}
 
@@ -110,7 +124,7 @@ func (i *Indexer) cmdStatus(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdTip(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
+	if !i.isGroupAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
@@ -139,7 +153,7 @@ func (i *Indexer) cmdTip(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdEpoch(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
+	if !i.isGroupAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
@@ -355,7 +369,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdNonce(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isGroupAllowed(m) {
 		return
 	}
 
@@ -463,7 +477,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdBlocks(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isGroupAllowed(m) {
 		return
 	}
 
@@ -505,7 +519,7 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdPing(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
+	if !i.isGroupAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
@@ -534,7 +548,7 @@ func (i *Indexer) cmdPing(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdDuck(m *telebot.Message) {
-	if !i.isAllowed(m) {
+	if !i.isGroupAllowed(m) {
 		return
 	}
 	url := getDuckImage()
