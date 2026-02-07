@@ -440,15 +440,25 @@ func (i *Indexer) Start() error {
 }
 
 // flushBlockBatch bulk-inserts blocks via CopyFrom and evolves nonce in-memory.
-// Falls back to individual ProcessBlock calls if CopyFrom fails (e.g., duplicates on resume).
+// Small batches (live tail) use individual ProcessBlock to avoid CopyFrom failures on rollbacks.
+// Large batches (historical sync) use CopyFrom for throughput, with fallback on duplicate keys.
 func (i *Indexer) flushBlockBatch(batch []BlockData) {
+	// Small batches (live tail after rollback) — use individual inserts with dedup
+	if len(batch) < 100 {
+		for _, b := range batch {
+			i.nonceTracker.ProcessBlock(b.Slot, b.Epoch, b.BlockHash, b.VrfOutput)
+		}
+		return
+	}
+
+	// Large batches (historical sync) — bulk insert via CopyFrom
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	err := i.store.InsertBlockBatch(ctx, batch)
 	cancel()
 
 	if err != nil {
 		// CopyFrom fails on duplicate keys — fall back to individual inserts
-		log.Printf("Batch insert failed (likely resume duplicates), falling back: %v", err)
+		log.Printf("Batch insert failed (resume duplicates), falling back: %v", err)
 		for _, b := range batch {
 			i.nonceTracker.ProcessBlock(b.Slot, b.Epoch, b.BlockHash, b.VrfOutput)
 		}
