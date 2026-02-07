@@ -16,11 +16,13 @@ networkMagic: 764824073  # mainnet. preprod is 1, preview is 2 and sancho is 4.
 
 telegram:
   enabled: true  # set to false to disable Telegram notifications
+  gifEnabled: true  # set to false to send photos instead of GIFs
   channel: "YOUR_TELEGRAM_CHANNEL_ID"
   # token via TELEGRAM_TOKEN env var
 
 twitter:
   enabled: false  # set to true and provide env vars to enable
+  gifEnabled: true  # set to false to post text-only tweets (no media)
   # Credentials via env vars: TWITTER_API_KEY, TWITTER_API_KEY_SECRET,
   # TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET
 
