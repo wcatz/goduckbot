@@ -27,7 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
-	"github.com/btcsuite/btcutil/bech32"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	koios "github.com/cardano-community/koios-go-client/v3"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gorilla/websocket"
@@ -93,7 +93,7 @@ type Indexer struct {
 	twitterClient      *gotwi.Client
 	// Bot command access control
 	allowedUsers map[int64]bool
-	ogmios       *OgmiosClient
+	nodeQuery *NodeQueryClient
 	// Leaderlog fields
 	vrfKey           *VRFKey
 	leaderlogEnabled bool
@@ -249,11 +249,10 @@ func (i *Indexer) Start() error {
 		log.Println("Telegram notifications disabled")
 	}
 
-	// Initialize Ogmios client
-	ogmiosURL := viper.GetString("ogmios.url")
-	if ogmiosURL != "" {
-		i.ogmios = NewOgmiosClient(ogmiosURL, i.networkMagic)
-		log.Printf("Ogmios client initialized: %s", ogmiosURL)
+	// Initialize node query client (NtC local state query via gouroboros)
+	if len(i.nodeAddresses) > 0 {
+		i.nodeQuery = NewNodeQueryClient(i.nodeAddresses[0], i.networkMagic)
+		log.Printf("Node query client initialized: %s", i.nodeAddresses[0])
 	}
 
 	// Twitter toggle
@@ -964,21 +963,14 @@ func (i *Indexer) sendTweet(text string, gifURL string) error {
 	return nil
 }
 
-// Convert to bech32 poolID
+// convertToBech32 converts a hex pool ID to bech32 format using gouroboros.
 func convertToBech32(hash string) (string, error) {
 	bytes, err := hex.DecodeString(hash)
 	if err != nil {
 		return "", err
 	}
-	fiveBitWords, err := bech32.ConvertBits(bytes, 8, 5, true)
-	if err != nil {
-		return "", err
-	}
-	bech32Str, err := bech32.Encode("pool", fiveBitWords)
-	if err != nil {
-		return "", err
-	}
-	return bech32Str, nil
+	poolId := ledger.NewBlake2b224(bytes)
+	return poolId.Bech32("pool"), nil
 }
 
 // extractVrfOutput extracts the VRF output from an adder block header.
