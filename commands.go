@@ -35,9 +35,9 @@ func (i *Indexer) isAllowed(m *telebot.Message) bool {
 	return ok
 }
 
-func (i *Indexer) requireOgmios(m *telebot.Message) bool {
-	if i.ogmios == nil {
-		i.bot.Send(m.Chat, "Ogmios not configured")
+func (i *Indexer) requireNodeQuery(m *telebot.Message) bool {
+	if i.nodeQuery == nil {
+		i.bot.Send(m.Chat, "Node query not configured")
 		return false
 	}
 	return true
@@ -57,7 +57,7 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"/validate <hash> \u2014 Check block on-chain\n" +
 		"/stake \u2014 Pool & network stake\n" +
 		"/blocks [epoch] \u2014 Pool block count\n" +
-		"/ping \u2014 Ogmios connectivity check"
+		"/ping \u2014 Node connectivity check"
 	i.bot.Send(m.Chat, msg)
 }
 
@@ -81,12 +81,12 @@ func (i *Indexer) cmdStatus(m *telebot.Message) {
 		"Mode: %s\n",
 		lastSlot, i.epoch, i.mode)
 
-	if i.ogmios == nil {
+	if i.nodeQuery == nil {
 		i.bot.Send(m.Chat, msg)
 		return
 	}
 
-	tipSlot, _, tipEpoch, tipErr := i.ogmios.QueryTip(ctx)
+	tipSlot, _, tipEpoch, tipErr := i.nodeQuery.QueryTip(ctx)
 	if tipErr == nil {
 		distance := int64(tipSlot) - int64(lastSlot)
 		syncPct := 0.0
@@ -98,21 +98,21 @@ func (i *Indexer) cmdStatus(m *telebot.Message) {
 			"Synced: %.2f%%\n",
 			tipSlot, tipEpoch, distance, syncPct)
 	} else {
-		msg += fmt.Sprintf("\nOgmios tip unavailable: %v", tipErr)
+		msg += fmt.Sprintf("\nNode tip unavailable: %v", tipErr)
 	}
 
 	i.bot.Send(m.Chat, msg)
 }
 
 func (i *Indexer) cmdTip(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireOgmios(m) {
+	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	slot, blockHash, epoch, err := i.ogmios.QueryTip(ctx)
+	slot, blockHash, epoch, err := i.nodeQuery.QueryTip(ctx)
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Error querying tip: %v", err))
 		return
@@ -134,7 +134,7 @@ func (i *Indexer) cmdTip(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdEpoch(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireOgmios(m) {
+	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
@@ -146,7 +146,7 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 	defer cancel()
 
 	var slotsIntoEpoch uint64
-	tipSlot, _, _, tipErr := i.ogmios.QueryTip(ctx)
+	tipSlot, _, _, tipErr := i.nodeQuery.QueryTip(ctx)
 	if tipErr == nil && tipSlot >= epochStart {
 		slotsIntoEpoch = tipSlot - epochStart
 	}
@@ -213,7 +213,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	if !i.requireOgmios(m) {
+	if !i.requireNodeQuery(m) {
 		return
 	}
 
@@ -233,8 +233,8 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	// Get stake from Ogmios live distribution (mark snapshot)
-	stakeDist, err := i.ogmios.QueryStakeDistribution(ctx)
+	// Get stake from node (mark snapshot via local state query)
+	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx)
 	if err != nil {
 		reply(fmt.Sprintf("Failed to get stake distribution: %v", err))
 		return
@@ -356,14 +356,14 @@ func (i *Indexer) cmdValidate(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdStake(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireOgmios(m) {
+	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	stakeDist, err := i.ogmios.QueryStakeDistribution(ctx)
+	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx)
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Error querying stake: %v", err))
 		return
@@ -441,7 +441,7 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 }
 
 func (i *Indexer) cmdPing(m *telebot.Message) {
-	if !i.isAllowed(m) || !i.requireOgmios(m) {
+	if !i.isAllowed(m) || !i.requireNodeQuery(m) {
 		return
 	}
 
@@ -449,16 +449,16 @@ func (i *Indexer) cmdPing(m *telebot.Message) {
 	defer cancel()
 
 	start := time.Now()
-	slot, _, epoch, err := i.ogmios.QueryTip(ctx)
+	slot, _, epoch, err := i.nodeQuery.QueryTip(ctx)
 	elapsed := time.Since(start)
 
 	if err != nil {
-		i.bot.Send(m.Chat, fmt.Sprintf("\u274C Ogmios unreachable: %v", err))
+		i.bot.Send(m.Chat, fmt.Sprintf("\u274C Node unreachable: %v", err))
 		return
 	}
 
 	msg := fmt.Sprintf("\U0001F3D3 Pong!\n\n"+
-		"Ogmios: %dms\n"+
+		"Node: %dms\n"+
 		"Tip: slot %d (epoch %d)\n",
 		elapsed.Milliseconds(), slot, epoch)
 

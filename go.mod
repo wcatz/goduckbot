@@ -7,7 +7,6 @@ toolchain go1.24.11
 require (
 	github.com/blinklabs-io/adder v0.37.0
 	github.com/blinklabs-io/gouroboros v0.153.0
-	github.com/btcsuite/btcutil v1.0.2
 	github.com/cardano-community/koios-go-client/v3 v3.1.3
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/gorilla/websocket v1.5.3
@@ -30,6 +29,7 @@ require (
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
+	github.com/btcsuite/btcutil v1.0.2 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/consensys/gnark-crypto v0.19.2 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
