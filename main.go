@@ -249,15 +249,16 @@ func (i *Indexer) Start() error {
 		log.Println("Telegram notifications disabled")
 	}
 
-	// Initialize node query client (NtC local state query via gouroboros)
-	// NtC uses a separate port (socat bridge to UNIX socket) from NtN chain sync.
+	// Initialize node query client (NtC local state query via gouroboros).
+	// Supports both TCP (socat bridge) and UNIX socket (direct) connections.
 	ntcHost := viper.GetString("nodeAddress.ntcHost")
 	if ntcHost == "" && len(i.nodeAddresses) > 0 {
 		ntcHost = i.nodeAddresses[0] // fallback to NtN address
 	}
 	if ntcHost != "" {
+		network, address := parseNodeAddress(ntcHost)
 		i.nodeQuery = NewNodeQueryClient(ntcHost, i.networkMagic)
-		log.Printf("Node query client initialized (NtC): %s", ntcHost)
+		log.Printf("Node query client initialized (NtC): %s://%s", network, address)
 	}
 
 	// Twitter toggle
