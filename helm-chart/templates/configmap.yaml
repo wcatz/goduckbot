@@ -28,10 +28,6 @@ data:
         - {{ . }}
         {{- end }}
       {{- end }}
-    {{- if .Values.config.ogmios }}
-    ogmios:
-      url: {{ .Values.config.ogmios.url | quote }}
-    {{- end }}
     twitter:
       enabled: {{ .Values.config.twitter.enabled }}
       api_version: "v2"
