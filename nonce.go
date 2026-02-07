@@ -212,26 +212,26 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 		return nonce, nil
 	}
 
-	// Full mode: compute from chain data
+	// Full mode: compute from chain data (no external dependencies)
 	if nt.fullMode {
 		log.Printf("Computing epoch %d nonce from chain data...", epoch)
 		computeCtx, computeCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer computeCancel()
 		nonce, err = nt.ComputeEpochNonce(computeCtx, epoch)
-		if err == nil {
-			// Cache computed nonce
-			cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cacheCancel()
-			if storeErr := nt.store.SetFinalNonce(cacheCtx, epoch, nonce, "computed"); storeErr != nil {
-				log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
-			}
-			return nonce, nil
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute nonce for epoch %d: %w", epoch, err)
 		}
-		log.Printf("Failed to compute nonce for epoch %d: %v, trying Koios fallback", epoch, err)
+		// Cache computed nonce
+		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cacheCancel()
+		if storeErr := nt.store.SetFinalNonce(cacheCtx, epoch, nonce, "computed"); storeErr != nil {
+			log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
+		}
+		return nonce, nil
 	}
 
-	// Koios fallback (lite mode or computation failure)
-	log.Printf("Falling back to Koios for epoch %d nonce", epoch)
+	// Lite mode only: Koios fallback
+	log.Printf("Falling back to Koios for epoch %d nonce (lite mode)", epoch)
 	nonce, err = nt.fetchNonceFromKoios(ctx, epoch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce for epoch %d: %w", epoch, err)
@@ -331,6 +331,112 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 	result := h.Sum(nil)
 	log.Printf("Computed nonce for epoch %d: %s", targetEpoch, hex.EncodeToString(result))
 	return result, nil
+}
+
+// BackfillNonces streams all blocks from Shelley genesis in a single pass,
+// computing and caching every epoch's nonce in the DB. Skips epochs that
+// already have a final_nonce. After completion, verifies the latest nonce
+// against Koios as an integrity check.
+func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
+	shelleyStart := ShelleyStartEpoch
+	if nt.networkMagic == PreprodNetworkMagic {
+		shelleyStart = PreprodShelleyStartEpoch
+	}
+
+	genesisHash, _ := hex.DecodeString(ShelleyGenesisHash)
+	etaV := make([]byte, 32)
+	copy(etaV, genesisHash)
+	eta0 := make([]byte, 32)
+	copy(eta0, genesisHash)
+	etaC := make([]byte, 32)
+
+	currentEpoch := shelleyStart
+	candidateFrozen := false
+	cached := 0
+	skipped := 0
+	lastCachedEpoch := 0
+
+	start := time.Now()
+	log.Printf("Nonce backfill starting from epoch %d...", shelleyStart)
+
+	rows, err := nt.store.StreamBlockNonces(ctx)
+	if err != nil {
+		return fmt.Errorf("streaming blocks: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		epoch, slot, nonceValue, scanErr := rows.Scan()
+		if scanErr != nil {
+			return fmt.Errorf("scanning block: %w", scanErr)
+		}
+
+		// Epoch transition — compute nonce for the new epoch
+		if epoch != currentEpoch {
+			if !candidateFrozen {
+				etaC = make([]byte, 32)
+				copy(etaC, etaV)
+			}
+			h, _ := blake2b.New256(nil)
+			h.Write(etaC)
+			h.Write(eta0)
+			eta0 = h.Sum(nil)
+
+			// Cache if not already present
+			existing, _ := nt.store.GetFinalNonce(ctx, epoch)
+			if existing == nil {
+				if storeErr := nt.store.SetFinalNonce(ctx, epoch, eta0, "backfill"); storeErr != nil {
+					log.Printf("Failed to cache nonce for epoch %d: %v", epoch, storeErr)
+				} else {
+					cached++
+					lastCachedEpoch = epoch
+				}
+			} else {
+				skipped++
+			}
+
+			currentEpoch = epoch
+			candidateFrozen = false
+		}
+
+		// Evolve eta_v
+		etaV = evolveNonce(etaV, nonceValue)
+
+		// Freeze candidate at stability window
+		if !candidateFrozen {
+			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlots(nt.networkMagic)
+			if slot >= stabilitySlot {
+				etaC = make([]byte, 32)
+				copy(etaC, etaV)
+				candidateFrozen = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("row iteration: %w", err)
+	}
+
+	log.Printf("Nonce backfill complete in %v: %d cached, %d skipped (already present)",
+		time.Since(start).Round(time.Second), cached, skipped)
+
+	// Integrity check: verify most recent nonce against Koios
+	if lastCachedEpoch > 0 && nt.koiosClient != nil {
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer verifyCancel()
+		computed, _ := nt.store.GetFinalNonce(verifyCtx, lastCachedEpoch)
+		koiosNonce, koiosErr := nt.fetchNonceFromKoios(verifyCtx, lastCachedEpoch)
+		if koiosErr != nil {
+			log.Printf("Nonce integrity check: could not fetch Koios nonce for epoch %d: %v", lastCachedEpoch, koiosErr)
+		} else if hex.EncodeToString(computed) == hex.EncodeToString(koiosNonce) {
+			log.Printf("Nonce integrity verified: epoch %d matches Koios", lastCachedEpoch)
+		} else {
+			log.Printf("WARNING: nonce mismatch for epoch %d! Computed: %x, Koios: %x",
+				lastCachedEpoch, computed, koiosNonce)
+		}
+	}
+
+	return nil
 }
 
 // fetchNonceFromKoios fetches the epoch nonce from Koios API.

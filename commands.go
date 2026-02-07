@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	koios "github.com/cardano-community/koios-go-client/v3"
 	telebot "gopkg.in/tucnak/telebot.v2"
 )
 
@@ -205,16 +206,75 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			return
 		}
 		targetEpoch = parsed
-		// Specific epoch — stored lookup only
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+
+		// Check DB first
 		stored, storeErr := i.store.GetLeaderSchedule(ctx, targetEpoch)
 		if storeErr == nil && stored != nil {
 			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ)
 			i.bot.Send(m.Chat, msg)
-		} else {
-			i.bot.Send(m.Chat, fmt.Sprintf("No stored schedule for epoch %d", targetEpoch))
+			return
 		}
+
+		// On-demand: compute using cached nonce + Koios for historical stake
+		sent, sendErr := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
+		replyEpoch := func(text string) {
+			if sendErr == nil {
+				i.bot.Edit(sent, text)
+			} else {
+				i.bot.Send(m.Chat, text)
+			}
+		}
+
+		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(targetEpoch)
+		if nonceErr != nil {
+			replyEpoch(fmt.Sprintf("Failed to get nonce for epoch %d: %v", targetEpoch, nonceErr))
+			return
+		}
+
+		// Historical stake from Koios
+		epochNo := koios.EpochNo(targetEpoch)
+		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+		if histErr != nil || len(poolHist.Data) == 0 {
+			replyEpoch(fmt.Sprintf("Failed to get pool stake for epoch %d from Koios", targetEpoch))
+			return
+		}
+		poolStake := uint64(poolHist.Data[0].ActiveStake.IntPart())
+
+		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+		if infoErr != nil || len(epochInfo.Data) == 0 {
+			replyEpoch(fmt.Sprintf("Failed to get epoch info for epoch %d from Koios", targetEpoch))
+			return
+		}
+		totalStake := uint64(epochInfo.Data[0].ActiveStake.IntPart())
+
+		if poolStake == 0 || totalStake == 0 {
+			replyEpoch(fmt.Sprintf("Invalid stake values for epoch %d: pool=%d, total=%d", targetEpoch, poolStake, totalStake))
+			return
+		}
+
+		epochLength := GetEpochLength(i.networkMagic)
+		epochStartSlot := GetEpochStartSlot(targetEpoch, i.networkMagic)
+		slotToTimeFn := makeSlotToTime(i.networkMagic)
+
+		schedule, calcErr := CalculateLeaderSchedule(
+			targetEpoch, epochNonce, i.vrfKey,
+			poolStake, totalStake,
+			epochLength, epochStartSlot, slotToTimeFn,
+		)
+		if calcErr != nil {
+			replyEpoch(fmt.Sprintf("Failed to calculate schedule: %v", calcErr))
+			return
+		}
+
+		if storeScheduleErr := i.store.InsertLeaderSchedule(ctx, schedule); storeScheduleErr != nil {
+			log.Printf("Failed to store schedule for epoch %d: %v", targetEpoch, storeScheduleErr)
+		}
+
+		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ)
+		replyEpoch(msg)
 		return
 	}
 
