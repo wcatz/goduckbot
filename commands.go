@@ -24,6 +24,7 @@ func (i *Indexer) registerCommands() {
 	i.bot.Handle("/stake", i.cmdStake)
 	i.bot.Handle("/blocks", i.cmdBlocks)
 	i.bot.Handle("/ping", i.cmdPing)
+	i.bot.Handle("/duck", i.cmdDuck)
 	log.Println("Bot commands registered")
 }
 
@@ -57,7 +58,8 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"/validate <hash> \u2014 Check block on-chain\n" +
 		"/stake \u2014 Pool & network stake\n" +
 		"/blocks [epoch] \u2014 Pool block count\n" +
-		"/ping \u2014 Node connectivity check"
+		"/ping \u2014 Node connectivity check\n" +
+		"/duck \u2014 Random duck pic"
 	i.bot.Send(m.Chat, msg)
 }
 
@@ -481,4 +483,13 @@ func (i *Indexer) cmdPing(m *telebot.Message) {
 	}
 
 	i.bot.Send(m.Chat, msg)
+}
+
+func (i *Indexer) cmdDuck(m *telebot.Message) {
+	if !i.isAllowed(m) {
+		return
+	}
+	url := getDuckImage()
+	photo := &telebot.Photo{File: telebot.FromURL(url)}
+	i.bot.Send(m.Chat, photo)
 }
