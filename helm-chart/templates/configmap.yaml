@@ -18,6 +18,9 @@ data:
       {{- if .Values.config.nodeAddress.host2 }}
       host2: {{ .Values.config.nodeAddress.host2 | quote }}
       {{- end }}
+      {{- if .Values.config.nodeAddress.ntcHost }}
+      ntcHost: {{ .Values.config.nodeAddress.ntcHost | quote }}
+      {{- end }}
     networkMagic: {{ .Values.config.networkMagic | int }}
     telegram:
       enabled: {{ .Values.config.telegram.enabled }}
