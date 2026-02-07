@@ -92,7 +92,8 @@ type Indexer struct {
 	twitterGifEnabled  bool
 	twitterClient      *gotwi.Client
 	// Bot command access control
-	allowedUsers map[int64]bool
+	allowedUsers  map[int64]bool
+	allowedGroups map[int64]bool
 	nodeQuery *NodeQueryClient
 	// Leaderlog fields
 	vrfKey           *VRFKey
@@ -237,13 +238,22 @@ func (i *Indexer) Start() error {
 		}
 		log.Println("Telegram bot initialized")
 
-		// Load allowed user IDs for bot commands
+		// Load allowed user IDs for bot commands (admin: all commands)
 		i.allowedUsers = make(map[int64]bool)
 		for _, id := range viper.GetIntSlice("telegram.allowedUsers") {
 			i.allowedUsers[int64(id)] = true
 		}
 		if len(i.allowedUsers) > 0 {
-			log.Printf("Bot commands enabled for %d user(s)", len(i.allowedUsers))
+			log.Printf("Bot commands enabled for %d admin user(s)", len(i.allowedUsers))
+		}
+
+		// Load allowed group IDs (group members: safe commands only)
+		i.allowedGroups = make(map[int64]bool)
+		for _, id := range viper.GetIntSlice("telegram.allowedGroups") {
+			i.allowedGroups[int64(id)] = true
+		}
+		if len(i.allowedGroups) > 0 {
+			log.Printf("Group commands enabled for %d group(s)", len(i.allowedGroups))
 		}
 	} else {
 		log.Println("Telegram notifications disabled")
