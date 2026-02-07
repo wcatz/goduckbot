@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync/atomic"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -43,6 +44,12 @@ type ChainSyncer struct {
 	blockssynced uint64 // atomic counter for progress logging
 	tipSlot      uint64 // atomic: current tip slot for progress tracking
 	caughtUp     atomic.Bool
+	// Progress tracking
+	syncStart    time.Time
+	lastLogTime  time.Time
+	lastLogSlot  uint64
+	currentEra   string
+	currentEpoch int
 }
 
 // NewChainSyncer creates a new historical chain syncer.
@@ -166,6 +173,26 @@ func (s *ChainSyncer) getIntersectForSlot(ctx context.Context, slot uint64) (pco
 	return pcommon.NewPoint(slot, hashBytes), nil
 }
 
+// blockTypeToEra maps a gouroboros block type constant to an era name.
+func blockTypeToEra(blockType uint) string {
+	switch blockType {
+	case ledger.BlockTypeShelley:
+		return "Shelley"
+	case ledger.BlockTypeAllegra:
+		return "Allegra"
+	case ledger.BlockTypeMary:
+		return "Mary"
+	case ledger.BlockTypeAlonzo:
+		return "Alonzo"
+	case ledger.BlockTypeBabbage:
+		return "Babbage"
+	case ledger.BlockTypeConway:
+		return "Conway"
+	default:
+		return fmt.Sprintf("unknown(%d)", blockType)
+	}
+}
+
 // handleRollForward processes a block received during NtN chain sync.
 func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType uint, data any, tip chainsync.Tip) error {
 	// Update tip for progress tracking
@@ -174,6 +201,13 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 	// Skip Byron blocks — no VRF data
 	if blockType == ledger.BlockTypeByronEbb || blockType == ledger.BlockTypeByronMain {
 		return nil
+	}
+
+	// Initialize timing on first post-Byron block
+	now := time.Now()
+	if s.syncStart.IsZero() {
+		s.syncStart = now
+		s.lastLogTime = now
 	}
 
 	// In NtN mode, data is a ledger.BlockHeader
@@ -186,6 +220,19 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 	blockHash := header.Hash().String()
 	epoch := SlotToEpoch(slot, s.networkMagic)
 
+	// Detect era transitions
+	era := blockTypeToEra(blockType)
+	if era != s.currentEra {
+		log.Printf("[sync] ━━━ entering %s era at slot %d (epoch %d) ━━━", era, slot, epoch)
+		s.currentEra = era
+	}
+
+	// Detect epoch transitions
+	if epoch != s.currentEpoch && s.currentEpoch > 0 {
+		log.Printf("[sync] epoch %d started at slot %d", epoch, slot)
+	}
+	s.currentEpoch = epoch
+
 	// Extract VRF output from header
 	vrfOutput := extractVrfFromHeader(blockType, header)
 	if vrfOutput == nil {
@@ -197,21 +244,42 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 		s.onBlock(slot, epoch, blockHash, vrfOutput)
 	}
 
-	// Log progress every 10,000 blocks
+	// Log progress every 5,000 blocks
 	count := atomic.AddUint64(&s.blockssynced, 1)
-	if count%10000 == 0 {
+	if count%5000 == 0 {
 		tipSlot := atomic.LoadUint64(&s.tipSlot)
 		pct := 0.0
 		if tipSlot > 0 {
 			pct = float64(slot) / float64(tipSlot) * 100
 		}
-		log.Printf("Sync progress: slot %d / %d (%.1f%%) — %d blocks processed", slot, tipSlot, pct, count)
+		elapsed := now.Sub(s.syncStart)
+		sinceLastLog := now.Sub(s.lastLogTime)
+		// Speed in slots/sec (more meaningful than blocks/sec for ETA)
+		var slotsPerSec float64
+		var eta time.Duration
+		if sinceLastLog.Seconds() > 0 && slot > s.lastLogSlot {
+			slotsPerSec = float64(slot-s.lastLogSlot) / sinceLastLog.Seconds()
+			if slotsPerSec > 0 && tipSlot > slot {
+				eta = time.Duration(float64(tipSlot-slot)/slotsPerSec) * time.Second
+			}
+		}
+		blkPerSec := float64(count) / elapsed.Seconds()
+
+		log.Printf("[sync] slot %d/%d (%.1f%%) | epoch %d | %s | %.0f blk/s | elapsed %s | ETA %s",
+			slot, tipSlot, pct, epoch, era, blkPerSec,
+			elapsed.Round(time.Second), eta.Round(time.Second))
+
+		s.lastLogTime = now
+		s.lastLogSlot = slot
 	}
 
 	// Check if caught up (within 120 slots / ~2 minutes of tip)
 	if !s.caughtUp.Load() && tip.Point.Slot > 0 && slot+120 >= tip.Point.Slot {
 		s.caughtUp.Store(true)
-		log.Printf("Historical sync caught up at slot %d (tip: %d). %d blocks processed.", slot, tip.Point.Slot, count)
+		elapsed := time.Since(s.syncStart)
+		avgBlkSec := float64(count) / elapsed.Seconds()
+		log.Printf("[sync] caught up in %s | %d blocks | avg %.0f blk/s",
+			elapsed.Round(time.Second), count, avgBlkSec)
 		if s.onCaughtUp != nil {
 			go s.onCaughtUp()
 		}
