@@ -380,6 +380,11 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 		totalStake += s
 	}
 
+	if totalStake == 0 {
+		i.bot.Send(m.Chat, "Total network stake is zero")
+		return
+	}
+
 	sigma := float64(poolStake) / float64(totalStake)
 	poolADA := int64(poolStake / 1_000_000)
 	totalADA := int64(totalStake / 1_000_000)
