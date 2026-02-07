@@ -52,7 +52,7 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"/status \u2014 DB sync status\n" +
 		"/tip \u2014 Current chain tip\n" +
 		"/epoch \u2014 Current epoch info\n" +
-		"/leaderlog [next|current] \u2014 Leader schedule\n" +
+		"/leaderlog [next|current|epoch] \u2014 Leader schedule\n" +
 		"/nonce [next|current] \u2014 Epoch nonce\n" +
 		"/validate <hash> \u2014 Check block on-chain\n" +
 		"/stake \u2014 Pool & network stake\n" +
@@ -185,16 +185,35 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	}
 
 	args := strings.TrimSpace(m.Payload)
-	targetType := "next"
-	if args == "current" {
-		targetType = "current"
-	}
 
+	// Parse argument: "next" (default), "current", or epoch number
 	var targetEpoch int
-	if targetType == "next" {
+	var snapType SnapshotType
+	switch {
+	case args == "" || args == "next":
 		targetEpoch = getCurrentEpoch() + 1
-	} else {
+		snapType = SnapshotMark
+	case args == "current":
 		targetEpoch = getCurrentEpoch()
+		snapType = SnapshotSet
+	default:
+		parsed, err := strconv.Atoi(args)
+		if err != nil {
+			i.bot.Send(m.Chat, "Usage: /leaderlog [next|current|<epoch>]")
+			return
+		}
+		targetEpoch = parsed
+		// Specific epoch — stored lookup only
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		stored, storeErr := i.store.GetLeaderSchedule(ctx, targetEpoch)
+		if storeErr == nil && stored != nil {
+			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ)
+			i.bot.Send(m.Chat, msg)
+		} else {
+			i.bot.Send(m.Chat, fmt.Sprintf("No stored schedule for epoch %d", targetEpoch))
+		}
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -205,11 +224,6 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	if err == nil && stored != nil {
 		msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ)
 		i.bot.Send(m.Chat, msg)
-		return
-	}
-
-	if targetType == "current" {
-		i.bot.Send(m.Chat, fmt.Sprintf("No stored schedule for current epoch %d", targetEpoch))
 		return
 	}
 
@@ -233,8 +247,8 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	// Get stake from node (mark snapshot via local state query)
-	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx)
+	// Get stake from node — mark for next epoch, set for current
+	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx, snapType)
 	if err != nil {
 		reply(fmt.Sprintf("Failed to get stake distribution: %v", err))
 		return
@@ -363,7 +377,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx)
+	stakeDist, err := i.nodeQuery.QueryStakeDistribution(ctx, SnapshotMark)
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Error querying stake: %v", err))
 		return

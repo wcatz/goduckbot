@@ -97,9 +97,18 @@ func (c *NodeQueryClient) QueryTip(ctx context.Context) (slot uint64, blockHash 
 	return
 }
 
-// QueryStakeDistribution returns the mark snapshot stake for all pools.
-// Returns map of bech32_pool_id -> mark_stake_lovelace.
-func (c *NodeQueryClient) QueryStakeDistribution(ctx context.Context) (map[string]uint64, error) {
+// SnapshotType selects which stake snapshot to read.
+type SnapshotType int
+
+const (
+	SnapshotMark SnapshotType = iota // next epoch
+	SnapshotSet                      // current epoch
+	SnapshotGo                       // two epochs ago
+)
+
+// QueryStakeDistribution returns stake for all pools from the given snapshot.
+// Returns map of bech32_pool_id -> stake_lovelace.
+func (c *NodeQueryClient) QueryStakeDistribution(ctx context.Context, snap SnapshotType) (map[string]uint64, error) {
 	var dist map[string]uint64
 	err := c.withQuery(ctx, func(client *localstatequery.Client) error {
 		result, qErr := client.GetStakeSnapshots(nil)
@@ -109,7 +118,14 @@ func (c *NodeQueryClient) QueryStakeDistribution(ctx context.Context) (map[strin
 		dist = make(map[string]uint64, len(result.PoolSnapshots))
 		for poolHash, snapshot := range result.PoolSnapshots {
 			poolId := ledger.PoolId(poolHash)
-			dist[poolId.String()] = snapshot.StakeMark
+			switch snap {
+			case SnapshotSet:
+				dist[poolId.String()] = snapshot.StakeSet
+			case SnapshotGo:
+				dist[poolId.String()] = snapshot.StakeGo
+			default:
+				dist[poolId.String()] = snapshot.StakeMark
+			}
 		}
 		return nil
 	})
