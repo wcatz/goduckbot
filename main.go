@@ -418,6 +418,7 @@ func (i *Indexer) Start() error {
 	} else {
 		log.Fatalf("failed to get pool lifetime blocks: %s", err)
 	}
+	log.Println("quack(duckBot initialized)")
 	log.Printf("duckBot started: %s | Epoch: %d | Epoch Blocks: %d | Lifetime Blocks: %d | Mode: %s",
 		i.poolName, i.epoch, i.epochBlocks, i.totalBlocks, i.mode)
 
@@ -625,15 +626,12 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	// Calculate the time difference between the current block event and the previous one
 	timeDiff := blockEventTime.Sub(prevBlockTimestamp)
 	if timeDiff.Seconds() < 60 {
-		timeDiffString = fmt.Sprintf("%.0f seconds", timeDiff.Seconds())
+		timeDiffString = fmt.Sprintf("%.0fs", timeDiff.Seconds())
 	} else {
 		minutes := int(timeDiff.Minutes())
 		seconds := int(timeDiff.Seconds()) - (minutes * 60)
-		timeDiffString = fmt.Sprintf("%d minute %02d seconds", minutes, seconds)
+		timeDiffString = fmt.Sprintf("%dm%02ds", minutes, seconds)
 	}
-
-	// Print the time difference to the terminal
-	fmt.Println("Time Difference:", timeDiffString)
 
 	// Update the previous block event timestamp with the current one
 	prevBlockTimestamp = blockEventTime
@@ -641,15 +639,16 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	// Convert the block event timestamp to local time
 	localTime := blockEventTime.In(time.Local)
 	blockEvent.Timestamp = localTime.Format("January 2, 2006 15:04:05 MST")
-	fmt.Printf("Local Time: %s\n", blockEvent.Timestamp)
 
-	// Convert issuer Vkey to Bech32
-	bech32PoolID, err := convertToBech32(blockEvent.Payload.IssuerVkey)
-	if err != nil {
-		log.Printf("failed to convert issuer vkey to Bech32: %s", err)
-	} else {
-		fmt.Printf("Bech32 poolID: %s\n", bech32PoolID)
+	// Log clean block line: slot, hash, nonce (VRF output)
+	vrfHex := ""
+	if vrfOutput != nil {
+		vrfHex = truncHash(hex.EncodeToString(vrfOutput), 16)
 	}
+	log.Printf("[block] slot %d | hash %s | nonce %s",
+		blockEvent.Context.SlotNumber,
+		truncHash(blockEvent.Payload.BlockHash, 16),
+		vrfHex)
 
 	// Customize links based on the network magic number
 	var cexplorerLink string
@@ -687,6 +686,13 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 
 		blockSizeKB := float64(blockEvent.Payload.BlockBodySize) / 1024
 		sizePercentage := (blockSizeKB / fullBlockSize) * 100
+
+		log.Printf("[MINTED] ★ slot %d | hash %s | txs %d | %.1fKB (%.0f%%) | epoch %d | lifetime %d",
+			blockEvent.Context.SlotNumber,
+			truncHash(blockEvent.Payload.BlockHash, 16),
+			blockEvent.Payload.TransactionCount,
+			blockSizeKB, sizePercentage,
+			i.epochBlocks, i.totalBlocks)
 
 		msg := fmt.Sprintf(
 			"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
@@ -775,9 +781,6 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			}
 		}
 	}
-
-	// Print the received event information
-	fmt.Printf("Received Event: %+v\n", blockEvent)
 
 	// Send the block event to the WebSocket clients
 	broadcast <- blockEvent
@@ -1212,6 +1215,14 @@ func makeSlotToTime(networkMagic int) func(uint64) time.Time {
 }
 
 // formatNumber formats an integer with comma separators (e.g., 1234567 -> "1,234,567").
+// truncHash returns the first n characters of a hex string.
+func truncHash(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 func formatNumber(n int64) string {
 	if n < 0 {
 		return "-" + formatNumber(-n)

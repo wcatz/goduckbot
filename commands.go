@@ -561,22 +561,90 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 		return
 	}
 
-	if !i.leaderlogEnabled {
+	if !i.leaderlogEnabled || i.vrfKey == nil {
 		i.bot.Send(m.Chat, "Leaderlog not enabled")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Get current epoch
 	currentEpoch := getCurrentEpoch()
 
-	// Get leader schedule for current epoch
-	schedule, err := i.store.GetLeaderSchedule(ctx, currentEpoch)
-	if err != nil {
-		i.bot.Send(m.Chat, fmt.Sprintf("No leader schedule found for epoch %d.\nRun /leaderlog current first.", currentEpoch))
-		return
+	// Try DB first with short timeout
+	ctxShort, cancelShort := context.WithTimeout(context.Background(), 10*time.Second)
+	schedule, err := i.store.GetLeaderSchedule(ctxShort, currentEpoch)
+	cancelShort()
+
+	// If no schedule, auto-compute it
+	if err != nil || schedule == nil {
+		sent, sendErr := i.bot.Send(m.Chat, "\U0001F986 Schedule not in database. Running leaderlog... standby quack")
+		reply := func(text string) {
+			if sendErr == nil {
+				i.bot.Edit(sent, text)
+			} else {
+				i.bot.Send(m.Chat, text)
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+
+		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(currentEpoch)
+		if nonceErr != nil {
+			reply(fmt.Sprintf("Failed to get nonce: %v", nonceErr))
+			return
+		}
+
+		var poolStake, totalStake uint64
+		if i.nodeQuery != nil {
+			snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
+			if snapErr != nil {
+				reply(fmt.Sprintf("Failed to get stake: %v", snapErr))
+				return
+			}
+			poolStake = snapshots.PoolStakeSet
+			totalStake = snapshots.TotalStakeSet
+		} else if i.koios != nil {
+			epochNo := koios.EpochNo(currentEpoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr != nil || len(poolHist.Data) == 0 {
+				reply("Failed to get stake from Koios")
+				return
+			}
+			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr != nil || len(epochInfo.Data) == 0 {
+				reply("Failed to get epoch info from Koios")
+				return
+			}
+			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+		} else {
+			reply("No stake data source available")
+			return
+		}
+
+		if totalStake == 0 {
+			reply("Total stake is zero")
+			return
+		}
+
+		epochLength := GetEpochLength(i.networkMagic)
+		epochStartSlot := GetEpochStartSlot(currentEpoch, i.networkMagic)
+		slotToTimeFn := makeSlotToTime(i.networkMagic)
+
+		computed, calcErr := CalculateLeaderSchedule(
+			currentEpoch, epochNonce, i.vrfKey,
+			poolStake, totalStake,
+			epochLength, epochStartSlot, slotToTimeFn,
+		)
+		if calcErr != nil {
+			reply(fmt.Sprintf("Failed to calculate schedule: %v", calcErr))
+			return
+		}
+
+		if storeErr := i.store.InsertLeaderSchedule(ctx, computed); storeErr != nil {
+			log.Printf("Failed to store schedule from /nextblock: %v", storeErr)
+		}
+
+		schedule = computed
 	}
 
 	if len(schedule.AssignedSlots) == 0 {
