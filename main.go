@@ -252,7 +252,7 @@ func (i *Indexer) Start() error {
 	// Initialize Ogmios client
 	ogmiosURL := viper.GetString("ogmios.url")
 	if ogmiosURL != "" {
-		i.ogmios = NewOgmiosClient(ogmiosURL)
+		i.ogmios = NewOgmiosClient(ogmiosURL, i.networkMagic)
 		log.Printf("Ogmios client initialized: %s", ogmiosURL)
 	}
 
