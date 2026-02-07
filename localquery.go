@@ -41,7 +41,7 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 		conn, err := ouroboros.NewConnection(
 			ouroboros.WithNetworkMagic(c.networkMagic),
 			ouroboros.WithNodeToNode(false),
-			ouroboros.WithKeepAlive(true),
+			ouroboros.WithKeepAlive(false),
 		)
 		if err != nil {
 			ch <- result{fmt.Errorf("creating connection: %w", err)}
