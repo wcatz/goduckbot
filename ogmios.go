@@ -7,21 +7,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // OgmiosClient provides an HTTP JSON-RPC client for querying Ogmios v6 instances.
 type OgmiosClient struct {
-	url        string
-	httpClient *http.Client
+	url          string
+	networkMagic int
+	httpClient   *http.Client
 }
 
 // NewOgmiosClient creates a new Ogmios client.
 // url should be like "http://ogmios-mainnet.cardano.svc.cluster.local:1337"
-func NewOgmiosClient(url string) *OgmiosClient {
+func NewOgmiosClient(url string, networkMagic int) *OgmiosClient {
 	return &OgmiosClient{
-		url: url,
+		url:          url,
+		networkMagic: networkMagic,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -96,6 +100,7 @@ func (c *OgmiosClient) query(ctx context.Context, method string) (json.RawMessag
 }
 
 // QueryTip returns the current chain tip.
+// Ogmios v6 does not return epoch in the tip response, so we derive it from slot.
 func (c *OgmiosClient) QueryTip(ctx context.Context) (slot uint64, blockHash string, epoch int, err error) {
 	result, err := c.query(ctx, "queryNetwork/tip")
 	if err != nil {
@@ -103,35 +108,52 @@ func (c *OgmiosClient) QueryTip(ctx context.Context) (slot uint64, blockHash str
 	}
 
 	var tipData struct {
-		Slot  uint64 `json:"slot"`
-		ID    string `json:"id"`
-		Epoch int    `json:"epoch"`
+		Slot uint64 `json:"slot"`
+		ID   string `json:"id"`
 	}
 	if err := json.Unmarshal(result, &tipData); err != nil {
 		return 0, "", 0, fmt.Errorf("parsing tip: %w", err)
 	}
-	return tipData.Slot, tipData.ID, tipData.Epoch, nil
+	derivedEpoch := SlotToEpoch(tipData.Slot, c.networkMagic)
+	return tipData.Slot, tipData.ID, derivedEpoch, nil
 }
 
 // QueryStakeDistribution returns the live stake distribution (mark snapshot).
-// Returns map of pool_id_bech32 -> stake_lovelace.
+// Returns map of pool_id_bech32 -> relative_stake (scaled to preserve ratios).
+// Ogmios v6 returns stake as rational fractions ("N/D"), not absolute lovelace.
 func (c *OgmiosClient) QueryStakeDistribution(ctx context.Context) (map[string]uint64, error) {
 	result, err := c.query(ctx, "queryLedgerState/liveStakeDistribution")
 	if err != nil {
 		return nil, fmt.Errorf("queryLedgerState/liveStakeDistribution: %w", err)
 	}
 
-	// Ogmios v6 response: {"pool1abc...": {"ada": {"lovelace": N}, "lovelace": N}, ...}
+	// Ogmios v6 response: {"pool1abc...": {"stake": "N/D", "vrf": "hex"}, ...}
 	var rawDist map[string]struct {
-		Lovelace uint64 `json:"lovelace"`
+		Stake string `json:"stake"`
 	}
 	if err := json.Unmarshal(result, &rawDist); err != nil {
 		return nil, fmt.Errorf("parsing stake distribution: %w", err)
 	}
 
+	// Parse rational fractions and scale to pseudo-lovelace values.
+	// Each "stake" is a fraction representing sigma (relative stake).
+	// We multiply by 1e15 to preserve precision as uint64.
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(15), nil)
 	dist := make(map[string]uint64, len(rawDist))
-	for poolID, stake := range rawDist {
-		dist[poolID] = stake.Lovelace
+	for poolID, entry := range rawDist {
+		parts := strings.SplitN(entry.Stake, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		num, ok1 := new(big.Int).SetString(parts[0], 10)
+		den, ok2 := new(big.Int).SetString(parts[1], 10)
+		if !ok1 || !ok2 || den.Sign() == 0 {
+			continue
+		}
+		// scaled = num * 1e15 / den
+		scaled := new(big.Int).Mul(num, scale)
+		scaled.Div(scaled, den)
+		dist[poolID] = scaled.Uint64()
 	}
 	return dist, nil
 }
