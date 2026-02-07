@@ -250,9 +250,14 @@ func (i *Indexer) Start() error {
 	}
 
 	// Initialize node query client (NtC local state query via gouroboros)
-	if len(i.nodeAddresses) > 0 {
-		i.nodeQuery = NewNodeQueryClient(i.nodeAddresses[0], i.networkMagic)
-		log.Printf("Node query client initialized: %s", i.nodeAddresses[0])
+	// NtC uses a separate port (socat bridge to UNIX socket) from NtN chain sync.
+	ntcHost := viper.GetString("nodeAddress.ntcHost")
+	if ntcHost == "" && len(i.nodeAddresses) > 0 {
+		ntcHost = i.nodeAddresses[0] // fallback to NtN address
+	}
+	if ntcHost != "" {
+		i.nodeQuery = NewNodeQueryClient(ntcHost, i.networkMagic)
+		log.Printf("Node query client initialized (NtC): %s", ntcHost)
 	}
 
 	// Twitter toggle

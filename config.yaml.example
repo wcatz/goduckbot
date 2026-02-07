@@ -9,8 +9,9 @@ poolId: "YOUR_POOL_ID"
 ticker: "TICKER"
 poolName: "Pool Name"
 nodeAddress:
-  host1: "YOUR_CARDANO_NODE_ADDRESS_1:PORT"
-  host2: "YOUR_CARDANO_NODE_ADDRESS_2:PORT"  # optional failover
+  host1: "YOUR_CARDANO_NODE_ADDRESS_1:3001"   # NtN (chain sync)
+  host2: "YOUR_CARDANO_NODE_ADDRESS_2:3001"   # NtN (optional failover)
+  ntcHost: "YOUR_CARDANO_NODE_ADDRESS_1:30000" # NtC (local state queries via socat)
 
 networkMagic: 764824073  # mainnet. preprod is 1, preview is 2 and sancho is 4.
 
