@@ -31,6 +31,12 @@ data:
         - {{ . }}
         {{- end }}
       {{- end }}
+      {{- if .Values.config.telegram.allowedGroups }}
+      allowedGroups:
+        {{- range .Values.config.telegram.allowedGroups }}
+        - {{ . }}
+        {{- end }}
+      {{- end }}
     twitter:
       enabled: {{ .Values.config.twitter.enabled }}
       api_version: "v2"
