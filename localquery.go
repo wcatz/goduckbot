@@ -31,34 +31,51 @@ func (c *NodeQueryClient) Close() error {
 }
 
 // withQuery creates a connection, acquires volatile tip, runs fn, then releases and closes.
+// The ctx is used to enforce caller timeouts — gouroboros methods don't accept context
+// natively, so the query runs in a goroutine and aborts if the context expires.
 func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequery.Client) error) error {
-	conn, err := ouroboros.NewConnection(
-		ouroboros.WithNetworkMagic(c.networkMagic),
-		ouroboros.WithNodeToNode(false),
-		ouroboros.WithKeepAlive(true),
-	)
-	if err != nil {
-		return fmt.Errorf("creating connection: %w", err)
-	}
-	defer conn.Close()
+	type result struct{ err error }
+	ch := make(chan result, 1)
 
-	if err := conn.Dial("tcp", c.nodeAddress); err != nil {
-		return fmt.Errorf("dialing %s: %w", c.nodeAddress, err)
-	}
-
-	client := conn.LocalStateQuery().Client
-	client.Start()
-
-	if err := client.Acquire(nil); err != nil {
-		return fmt.Errorf("acquire volatile tip: %w", err)
-	}
-	defer func() {
-		if releaseErr := client.Release(); releaseErr != nil {
-			log.Printf("localstatequery release: %v", releaseErr)
+	go func() {
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithNetworkMagic(c.networkMagic),
+			ouroboros.WithNodeToNode(false),
+			ouroboros.WithKeepAlive(true),
+		)
+		if err != nil {
+			ch <- result{fmt.Errorf("creating connection: %w", err)}
+			return
 		}
+		defer conn.Close()
+
+		if err := conn.Dial("tcp", c.nodeAddress); err != nil {
+			ch <- result{fmt.Errorf("dialing %s: %w", c.nodeAddress, err)}
+			return
+		}
+
+		client := conn.LocalStateQuery().Client
+		client.Start()
+
+		if err := client.Acquire(nil); err != nil {
+			ch <- result{fmt.Errorf("acquire volatile tip: %w", err)}
+			return
+		}
+		defer func() {
+			if releaseErr := client.Release(); releaseErr != nil {
+				log.Printf("localstatequery release: %v", releaseErr)
+			}
+		}()
+
+		ch <- result{fn(client)}
 	}()
 
-	return fn(client)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case r := <-ch:
+		return r.err
+	}
 }
 
 // QueryTip returns the current chain tip (slot, blockHash, epoch).
@@ -110,7 +127,7 @@ type StakeSnapshots struct {
 }
 
 // QueryPoolStakeSnapshots returns mark/set/go snapshots for a specific pool.
-// poolIdHex is the 56-char hex pool ID (e.g., from config).
+// poolIdBech32 is the bech32 pool ID (e.g., "pool1...").
 func (c *NodeQueryClient) QueryPoolStakeSnapshots(ctx context.Context, poolIdBech32 string) (*StakeSnapshots, error) {
 	poolId, err := ledger.NewPoolIdFromBech32(poolIdBech32)
 	if err != nil {
