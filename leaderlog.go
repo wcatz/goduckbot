@@ -263,6 +263,20 @@ func GetEpochLength(networkMagic int) uint64 {
 	return MainnetEpochLength
 }
 
+// StabilityWindowSlots returns the number of slots into an epoch at which
+// the candidate nonce freezes. In Cardano CPRAOS this is epochLength - 4k/f
+// where k=2160 and f=0.05, giving 259200 slots (60% of mainnet epoch).
+func StabilityWindowSlots(networkMagic int) uint64 {
+	epochLen := GetEpochLength(networkMagic)
+	// 4k/f = 4 * 2160 / 0.05 = 172800 slots before epoch end
+	const stabilityMargin = 172800
+	if epochLen <= stabilityMargin {
+		// Preview has 86400 slots — use 60% proportionally
+		return epochLen * 60 / 100
+	}
+	return epochLen - stabilityMargin
+}
+
 // SlotToEpoch returns the epoch number for a given slot.
 // Accounts for Byron era offset on mainnet and preprod.
 func SlotToEpoch(slot uint64, networkMagic int) int {
