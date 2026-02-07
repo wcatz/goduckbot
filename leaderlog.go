@@ -307,31 +307,29 @@ func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone stri
 		loc = time.UTC
 	}
 
-	poolStakeADA := int64(schedule.PoolStake / 1_000_000)
-	totalStakeADA := int64(schedule.TotalStake / 1_000_000)
 	performance := 0.0
 	if schedule.IdealSlots > 0 {
 		performance = float64(len(schedule.AssignedSlots)) / schedule.IdealSlots * 100
 	}
 
-	msg := fmt.Sprintf("🦆 %s Leader Schedule\n\n", poolName)
-	msg += fmt.Sprintf("Epoch: %d\n", schedule.Epoch)
-	msg += fmt.Sprintf("Pool Stake: %s ADA\n", formatNumber(poolStakeADA))
-	msg += fmt.Sprintf("Network Stake: %s ADA\n\n", formatNumber(totalStakeADA))
-	msg += fmt.Sprintf("Assigned Slots: %d\n", len(schedule.AssignedSlots))
-	msg += fmt.Sprintf("Expected: %.2f\n", schedule.IdealSlots)
-	msg += fmt.Sprintf("Performance: %.2f%%\n\n", performance)
+	msg := fmt.Sprintf("Epoch: %d\n", schedule.Epoch)
+	msg += fmt.Sprintf("Nonce: %s\n", schedule.EpochNonce)
+	msg += fmt.Sprintf("Pool Active Stake:  %s\u20B3\n", formatNumber(int64(schedule.PoolStake)))
+	msg += fmt.Sprintf("Network Active Stake: %s\u20B3\n", formatNumber(int64(schedule.TotalStake)))
+	msg += fmt.Sprintf("Ideal Blocks: %.2f\n\n", schedule.IdealSlots)
 
 	if len(schedule.AssignedSlots) > 0 {
-		msg += fmt.Sprintf("Schedule (%s):\n", timezone)
+		msg += fmt.Sprintf("Assigned Slots Times in 12-hour Format (%s):\n", timezone)
 		for _, slot := range schedule.AssignedSlots {
 			localTime := slot.At.In(loc)
-			msg += fmt.Sprintf("  %s - Slot %d\n", localTime.Format("01/02 3:04:05 PM"), slot.Slot)
+			msg += fmt.Sprintf("  %s - Slot: %d  - B: %d\n",
+				localTime.Format("01/02/2006 03:04:05 PM"), slot.SlotInEpoch, slot.No)
 		}
 	} else {
 		msg += "No slots assigned this epoch.\n"
 	}
 
-	msg += "\nQuack! 🦆"
+	msg += fmt.Sprintf("\nTotal Scheduled Blocks: %d\n", len(schedule.AssignedSlots))
+	msg += fmt.Sprintf("Assigned Epoch Performance: %.2f %%\n", performance)
 	return msg
 }
