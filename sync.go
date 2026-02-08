@@ -149,6 +149,7 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	}
 
 	// Watchdog: force-close connection if no block for 5 minutes
+	done := make(chan struct{})
 	watchdogDone := make(chan struct{})
 	go func() {
 		defer close(watchdogDone)
@@ -156,7 +157,7 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
 				return
 			case <-ticker.C:
 				if !s.caughtUp.Load() {
@@ -175,10 +176,12 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	// Block until error or context cancellation
 	select {
 	case <-ctx.Done():
+		close(done)
 		conn.Close()
 		<-watchdogDone
 		return ctx.Err()
 	case err := <-errChan:
+		close(done)
 		conn.Close()
 		<-watchdogDone
 		return fmt.Errorf("chain sync error: %w", err)
@@ -305,8 +308,9 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 	// Update watchdog timestamp
 	s.lastBlockTime.Store(now.Unix())
 
-	// Deliver to nonce tracking callback
-	if s.onBlock != nil {
+	// Deliver to nonce tracking callback (historical sync only — after caught up,
+	// handleLiveBlock handles nonce tracking to avoid double processing)
+	if !s.caughtUp.Load() && s.onBlock != nil {
 		s.onBlock(slot, epoch, blockHash, vrfOutput)
 	}
 

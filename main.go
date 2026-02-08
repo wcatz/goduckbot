@@ -449,6 +449,9 @@ func (i *Indexer) runChainTail() error {
 		return fmt.Errorf("no node addresses configured")
 	}
 	fullMode := i.mode == "full" && i.leaderlogEnabled
+	if i.mode == "full" && !i.leaderlogEnabled {
+		log.Println("WARNING: full mode requires leaderlog.enabled; falling back to lite mode")
+	}
 
 	for {
 		for _, host := range hosts {
