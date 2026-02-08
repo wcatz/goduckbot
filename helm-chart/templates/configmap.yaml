@@ -40,6 +40,11 @@ data:
     twitter:
       enabled: {{ .Values.config.twitter.enabled }}
       api_version: "v2"
+    duck:
+      media: {{ .Values.config.duck.media | quote }}
+      {{- if .Values.config.duck.customUrl }}
+      customUrl: {{ .Values.config.duck.customUrl | quote }}
+      {{- end }}
     {{- if .Values.config.leaderlog.enabled }}
     leaderlog:
       enabled: true
