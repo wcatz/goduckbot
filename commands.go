@@ -85,19 +85,19 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		return
 	}
 	msg := "\U0001F986 duckBot Commands\n\n" +
-		"/help \u2014 Show this help message\n" +
-		"/status \u2014 DB sync status\n" +
-		"/tip \u2014 Current chain tip\n" +
-		"/epoch \u2014 Current epoch info\n" +
-		"/leaderlog [next|current|epoch] \u2014 Leader schedule\n" +
-		"/nextblock \u2014 Next scheduled block slot & time\n" +
-		"/nonce [next|current] \u2014 Epoch nonce\n" +
-		"/validate <hash> \u2014 Check block on-chain\n" +
-		"/stake \u2014 Pool & network stake\n" +
-		"/blocks [epoch] \u2014 Pool block count\n" +
-		"/ping \u2014 Node connectivity check\n" +
-		"/duck \u2014 Random duck pic"
-	i.bot.Send(m.Chat, msg)
+		"`/help` \u2014 Show this help message\n" +
+		"`/status` \u2014 DB sync status\n" +
+		"`/tip` \u2014 Current chain tip\n" +
+		"`/epoch` \u2014 Current epoch info\n" +
+		"`/leaderlog` \\[next|current|epoch] \u2014 Leader schedule\n" +
+		"`/nextblock` \u2014 Next scheduled block slot & time\n" +
+		"`/nonce` \\[next|current] \u2014 Epoch nonce\n" +
+		"`/validate` <hash> \u2014 Check block on-chain\n" +
+		"`/stake` \u2014 Pool & network stake\n" +
+		"`/blocks` \\[epoch] \u2014 Pool block count\n" +
+		"`/ping` \u2014 Node connectivity check\n" +
+		"`/duck` \u2014 Random duck pic"
+	i.bot.Send(m.Chat, msg, telebot.ModeMarkdown)
 }
 
 func (i *Indexer) cmdStatus(m *telebot.Message) {
@@ -238,7 +238,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	default:
 		parsed, err := strconv.Atoi(args)
 		if err != nil {
-			i.bot.Send(m.Chat, "Usage: /leaderlog [next|current|<epoch>]")
+			i.bot.Send(m.Chat, "Usage: `/leaderlog` \\[next|current|<epoch>]", telebot.ModeMarkdown)
 			return
 		}
 		targetEpoch = parsed
@@ -429,7 +429,7 @@ func (i *Indexer) cmdValidate(m *telebot.Message) {
 
 	hash := strings.TrimSpace(m.Payload)
 	if hash == "" {
-		i.bot.Send(m.Chat, "Usage: /validate <block_hash>")
+		i.bot.Send(m.Chat, "Usage: `/validate` <block\\_hash>", telebot.ModeMarkdown)
 		return
 	}
 
@@ -539,7 +539,7 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 	if args != "" {
 		parsed, err := strconv.Atoi(args)
 		if err != nil {
-			i.bot.Send(m.Chat, "Usage: /blocks [epoch_number]")
+			i.bot.Send(m.Chat, "Usage: `/blocks` \\[epoch\\_number]", telebot.ModeMarkdown)
 			return
 		}
 		epoch = parsed
