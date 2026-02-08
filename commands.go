@@ -27,6 +27,7 @@ func (i *Indexer) registerCommands() {
 	i.bot.Handle("/ping", i.cmdPing)
 	i.bot.Handle("/duck", i.cmdDuck)
 	i.bot.Handle("/nextblock", i.cmdNextBlock)
+	i.bot.Handle("/version", i.cmdVersion)
 
 	// Register command menu with Telegram so users see / autocomplete
 	err := i.bot.SetCommands([]telebot.Command{
@@ -42,6 +43,7 @@ func (i *Indexer) registerCommands() {
 		{Text: "blocks", Description: "Pool block count"},
 		{Text: "ping", Description: "Node connectivity check"},
 		{Text: "duck", Description: "Random duck pic"},
+		{Text: "version", Description: "Bot version info"},
 	})
 	if err != nil {
 		log.Printf("Failed to set bot command menu: %v", err)
@@ -96,7 +98,8 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"`/stake` \u2014 Pool & network stake\n" +
 		"`/blocks` \\[epoch] \u2014 Pool block count\n" +
 		"`/ping` \u2014 Node connectivity check\n" +
-		"`/duck` \u2014 Random duck pic"
+		"`/duck` \u2014 Random duck pic\n" +
+		"`/version` \u2014 Bot version info"
 	i.bot.Send(m.Chat, msg, telebot.ModeMarkdown)
 }
 
@@ -254,7 +257,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			return
 		}
 
-		// On-demand: compute using cached nonce + Koios for historical stake
+		// On-demand: compute using cached nonce + NtC/Koios for stake
 		sent, sendErr := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
 		replyEpoch := func(text string) {
 			if sendErr == nil {
@@ -270,24 +273,59 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			return
 		}
 
-		// Historical stake from Koios
-		epochNo := koios.EpochNo(targetEpoch)
-		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-		if histErr != nil || len(poolHist.Data) == 0 {
-			replyEpoch(fmt.Sprintf("Failed to get pool stake for epoch %d from Koios", targetEpoch))
-			return
+		// Try NtC first if epoch is within snapshot range (mark/set/go)
+		var poolStake, totalStake uint64
+		curEpoch := getCurrentEpoch()
+		if i.nodeQuery != nil {
+			var snap SnapshotType
+			ntcAvailable := true
+			switch targetEpoch {
+			case curEpoch + 1:
+				snap = SnapshotMark
+			case curEpoch:
+				snap = SnapshotSet
+			case curEpoch - 2:
+				snap = SnapshotGo
+			default:
+				ntcAvailable = false
+			}
+			if ntcAvailable {
+				ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Second)
+				snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
+				ntcCancel()
+				if snapErr != nil {
+					log.Printf("NtC stake query for epoch %d failed (socat stalled): %v", targetEpoch, snapErr)
+				} else {
+					switch snap {
+					case SnapshotMark:
+						poolStake = snapshots.PoolStakeMark
+						totalStake = snapshots.TotalStakeMark
+					case SnapshotSet:
+						poolStake = snapshots.PoolStakeSet
+						totalStake = snapshots.TotalStakeSet
+					case SnapshotGo:
+						poolStake = snapshots.PoolStakeGo
+						totalStake = snapshots.TotalStakeGo
+					}
+				}
+			}
 		}
-		poolStake := uint64(poolHist.Data[0].ActiveStake.IntPart())
 
-		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-		if infoErr != nil || len(epochInfo.Data) == 0 {
-			replyEpoch(fmt.Sprintf("Failed to get epoch info for epoch %d from Koios", targetEpoch))
-			return
+		// Koios fallback for epochs outside NtC range or NtC failure
+		if poolStake == 0 && i.koios != nil {
+			epochNo := koios.EpochNo(targetEpoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr == nil && len(poolHist.Data) > 0 {
+				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			}
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr == nil && len(epochInfo.Data) > 0 {
+				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			}
 		}
-		totalStake := uint64(epochInfo.Data[0].ActiveStake.IntPart())
 
 		if poolStake == 0 || totalStake == 0 {
-			replyEpoch(fmt.Sprintf("Invalid stake values for epoch %d: pool=%d, total=%d", targetEpoch, poolStake, totalStake))
+			replyEpoch(fmt.Sprintf("Failed to get stake for epoch %d from NtC or Koios", targetEpoch))
 			return
 		}
 
@@ -479,9 +517,9 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	var poolStake, totalStake uint64
 	source := "NtC"
 
-	// Try NtC first with 60s timeout
+	// Try NtC first with 5s timeout
 	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
+		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Second)
 		snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 		ntcCancel()
 		if err != nil {
@@ -494,7 +532,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 
 	// Koios fallback
 	if poolStake == 0 && i.koios != nil {
-		source = "Koios"
+		source = "Koios (NtC socat stalled)"
 		currentEpoch := getCurrentEpoch()
 		for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
 			epochNo := koios.EpochNo(tryEpoch)
@@ -762,6 +800,25 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 		nextSlot.Slot,
 		localTime.Format("01/02/2006 03:04:05 PM MST"),
 		countdown)
+
+	i.bot.Send(m.Chat, msg)
+}
+
+func (i *Indexer) cmdVersion(m *telebot.Message) {
+	if !i.isGroupAllowed(m) {
+		return
+	}
+
+	sha := commitSHA
+	if len(sha) > 8 {
+		sha = sha[:8]
+	}
+
+	msg := fmt.Sprintf("\U0001F986 duckBot %s\n\n"+
+		"Commit: %s\n"+
+		"Built: %s\n"+
+		"Mode: %s",
+		version, sha, buildDate, i.mode)
 
 	i.bot.Send(m.Chat, msg)
 }
