@@ -9,7 +9,9 @@ ARG BUILD_DATE=unknown
 WORKDIR /app
 COPY . .
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o goduckbot .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
+    -ldflags "-X main.version=${VERSION} -X main.commitSHA=${COMMIT_SHA} -X main.buildDate=${BUILD_DATE}" \
+    -o goduckbot .
 
 # Stage 2: Create a minimal runtime image
 FROM debian:bookworm-slim

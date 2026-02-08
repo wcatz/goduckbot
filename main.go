@@ -39,6 +39,13 @@ import (
 	telebot "gopkg.in/tucnak/telebot.v2"
 )
 
+// Build-time version metadata (set via -ldflags)
+var (
+	version   = "dev"
+	commitSHA = "unknown"
+	buildDate = "unknown"
+)
+
 const (
 	fullBlockSize       = 87.97
 	EpochDurationInDays = 5
