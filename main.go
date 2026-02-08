@@ -914,6 +914,30 @@ func (i *Indexer) getDuckMedia() (string, bool, error) {
 	return mediaURL, isGif, nil
 }
 
+// fetchDuckByType fetches a duck with an explicit type ("gif" or "jpg"), ignoring config.
+func (i *Indexer) fetchDuckByType(mediaType string) (string, bool, error) {
+	endpoint := fmt.Sprintf("https://random-d.uk/api/v2/random?type=%s", mediaType)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to fetch duck media: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("duck API returned status %d", resp.StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", false, fmt.Errorf("failed to decode duck response: %w", err)
+	}
+	mediaURL, ok := result["url"].(string)
+	if !ok || mediaURL == "" {
+		return "", false, fmt.Errorf("no URL in duck API response")
+	}
+	isGif := strings.HasSuffix(strings.ToLower(mediaURL), ".gif")
+	return mediaURL, isGif, nil
+}
+
 // Download image from URL to bytes
 func downloadImage(imageURL string) ([]byte, error) {
 	client := &http.Client{Timeout: 30 * time.Second}

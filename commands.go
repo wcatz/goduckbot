@@ -42,7 +42,7 @@ func (i *Indexer) registerCommands() {
 		{Text: "stake", Description: "Pool & network stake"},
 		{Text: "blocks", Description: "Pool block count"},
 		{Text: "ping", Description: "Node connectivity check"},
-		{Text: "duck", Description: "Random duck pic"},
+		{Text: "duck", Description: "Random duck pic (gif|img)"},
 		{Text: "version", Description: "Bot version info"},
 	})
 	if err != nil {
@@ -98,7 +98,7 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"`/stake` \u2014 Pool & network stake\n" +
 		"`/blocks` \\[epoch] \u2014 Pool block count\n" +
 		"`/ping` \u2014 Node connectivity check\n" +
-		"`/duck` \u2014 Random duck pic\n" +
+		"`/duck` \\[gif|img] \u2014 Random duck pic\n" +
 		"`/version` \u2014 Bot version info"
 	i.bot.Send(m.Chat, msg, telebot.ModeMarkdown)
 }
@@ -642,7 +642,21 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
 		return
 	}
-	mediaURL, isGif, err := i.getDuckMedia()
+
+	// /duck gif → force GIF, /duck img → force image, /duck → use config default
+	var mediaURL string
+	var isGif bool
+	var err error
+	arg := strings.ToLower(strings.TrimSpace(m.Payload))
+	switch arg {
+	case "gif":
+		mediaURL, isGif, err = i.fetchDuckByType("gif")
+	case "img", "image":
+		mediaURL, isGif, err = i.fetchDuckByType("jpg")
+	default:
+		mediaURL, isGif, err = i.getDuckMedia()
+	}
+
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Failed to fetch duck: %v", err))
 		return
