@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,6 +93,9 @@ type Indexer struct {
 	wg              sync.WaitGroup
 	// Mode: "lite" (adder tail + Koios) or "full" (historical sync + adder tail)
 	mode string
+	// Duck media settings
+	duckMedia     string // "gif", "image", or "both" (default)
+	duckCustomUrl string // custom override URL
 	// Social network toggles
 	telegramEnabled bool
 	twitterEnabled  bool
@@ -207,6 +212,11 @@ func (i *Indexer) Start() error {
 	i.telegramToken = os.Getenv("TELEGRAM_TOKEN")
 	i.image = viper.GetString("image")
 	i.networkMagic = viper.GetInt("networkMagic")
+	i.duckMedia = viper.GetString("duck.media")
+	if i.duckMedia == "" {
+		i.duckMedia = "both"
+	}
+	i.duckCustomUrl = viper.GetString("duck.customUrl")
 	// Store the node addresses hosts into the array nodeAddresses in the Indexer
 	i.nodeAddresses = viper.GetStringSlice("nodeAddress.host1")
 	i.nodeAddresses = append(i.nodeAddresses, viper.GetStringSlice("nodeAddress.host2")...)
@@ -733,10 +743,10 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			timeDiffString, i.epochBlocks, i.totalBlocks,
 			blockEvent.Context.BlockNumber, blockEvent.Payload.BlockHash)
 
-		// Get random duck GIF for notifications
-		gifURL, gifErr := getRandomDuckGIF()
-		if gifErr != nil {
-			log.Printf("failed to fetch duck GIF: %v", gifErr)
+		// Get duck media for notifications
+		mediaURL, isGif, mediaErr := i.getDuckMedia()
+		if mediaErr != nil {
+			log.Printf("failed to fetch duck media: %v", mediaErr)
 		}
 
 		// Send Telegram notification if enabled
@@ -747,15 +757,21 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			} else {
 				chat := &telebot.Chat{ID: channelID}
 				sent := false
-				if gifURL != "" {
-					animation := &telebot.Animation{
-						File:    telebot.FromURL(gifURL),
-						Caption: msg,
-					}
-					if _, err = i.bot.Send(chat, animation); err != nil {
-						log.Printf("failed to send Telegram GIF, sending text only: %s", err)
+				if mediaURL != "" {
+					if isGif {
+						animation := &telebot.Animation{File: telebot.FromURL(mediaURL), Caption: msg}
+						if _, err = i.bot.Send(chat, animation); err != nil {
+							log.Printf("failed to send Telegram GIF: %s", err)
+						} else {
+							sent = true
+						}
 					} else {
-						sent = true
+						photo := &telebot.Photo{File: telebot.FromURL(mediaURL), Caption: msg}
+						if _, err = i.bot.Send(chat, photo); err != nil {
+							log.Printf("failed to send Telegram photo: %s", err)
+						} else {
+							sent = true
+						}
 					}
 				}
 				if !sent {
@@ -778,7 +794,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
 				timeDiffString, i.epochBlocks, i.totalBlocks)
 
-			if err := i.sendTweet(tweetMsg, gifURL); err != nil {
+			if err := i.sendTweet(tweetMsg, mediaURL, isGif); err != nil {
 				log.Printf("failed to send tweet: %s", err)
 			}
 		}
@@ -855,26 +871,47 @@ func handleMessages() {
 	}
 }
 
-// Get random duck image URL with timeout and safe error handling
-func getRandomDuckGIF() (string, error) {
+// getDuckMedia returns a duck media URL and whether it's a GIF.
+// Uses customUrl if set, otherwise fetches from random-d.uk based on media setting.
+func (i *Indexer) getDuckMedia() (string, bool, error) {
+	if i.duckCustomUrl != "" {
+		isGif := strings.HasSuffix(strings.ToLower(i.duckCustomUrl), ".gif")
+		return i.duckCustomUrl, isGif, nil
+	}
+
+	endpoint := "https://random-d.uk/api/v2/random"
+	switch i.duckMedia {
+	case "gif":
+		endpoint += "?type=gif"
+	case "image":
+		endpoint += "?type=jpg"
+	default: // "both" — random-d.uk picks randomly, but we can also randomize
+		if rand.Intn(2) == 0 {
+			endpoint += "?type=gif"
+		} else {
+			endpoint += "?type=jpg"
+		}
+	}
+
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://random-d.uk/api/v2/random?type=gif")
+	resp, err := client.Get(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch duck GIF: %w", err)
+		return "", false, fmt.Errorf("failed to fetch duck media: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("duck API returned status %d", resp.StatusCode)
+		return "", false, fmt.Errorf("duck API returned status %d", resp.StatusCode)
 	}
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode duck response: %w", err)
+		return "", false, fmt.Errorf("failed to decode duck response: %w", err)
 	}
-	gifURL, ok := result["url"].(string)
-	if !ok || gifURL == "" {
-		return "", fmt.Errorf("no URL in duck API response")
+	mediaURL, ok := result["url"].(string)
+	if !ok || mediaURL == "" {
+		return "", false, fmt.Errorf("no URL in duck API response")
 	}
-	return gifURL, nil
+	isGif := strings.HasSuffix(strings.ToLower(mediaURL), ".gif")
+	return mediaURL, isGif, nil
 }
 
 // Download image from URL to bytes
@@ -955,8 +992,8 @@ func (i *Indexer) uploadMediaToTwitter(mediaBytes []byte, mediaType upload_types
 	return finalizeOutput.Data.MediaID, nil
 }
 
-// Send tweet with optional GIF
-func (i *Indexer) sendTweet(text string, gifURL string) error {
+// Send tweet with optional media (GIF or image)
+func (i *Indexer) sendTweet(text string, mediaURL string, isGif bool) error {
 	if !i.twitterEnabled || i.twitterClient == nil {
 		return nil
 	}
@@ -966,26 +1003,25 @@ func (i *Indexer) sendTweet(text string, gifURL string) error {
 		Text: gotwi.String(text),
 	}
 
-	// If GIF URL is provided, download and upload it
-	if gifURL != "" {
-		gifBytes, err := downloadImage(gifURL)
+	// If media URL is provided, download and upload it
+	if mediaURL != "" {
+		mediaBytes, err := downloadImage(mediaURL)
 		if err != nil {
-			log.Printf("failed to download GIF, posting text-only tweet: %v", err)
+			log.Printf("failed to download media, posting text-only tweet: %v", err)
 		} else {
-			// Upload GIF to Twitter
-			mediaID, uploadErr := i.uploadMediaToTwitter(
-				gifBytes,
-				upload_types.MediaTypeGIF,
-				upload_types.MediaCategoryTweetGIF,
-			)
+			mediaType := upload_types.MediaTypeJPEG
+			mediaCategory := upload_types.MediaCategoryTweetImage
+			if isGif {
+				mediaType = upload_types.MediaTypeGIF
+				mediaCategory = upload_types.MediaCategoryTweetGIF
+			}
+			mediaID, uploadErr := i.uploadMediaToTwitter(mediaBytes, mediaType, mediaCategory)
 			if uploadErr != nil {
-				log.Printf("failed to upload GIF to Twitter, posting text-only tweet: %v", uploadErr)
+				log.Printf("failed to upload media to Twitter, posting text-only tweet: %v", uploadErr)
 			} else {
-				// Attach media to tweet
 				input.Media = &types.CreateInputMedia{
 					MediaIDs: []string{mediaID},
 				}
-				log.Printf("GIF uploaded successfully, media_id: %s", mediaID)
 			}
 		}
 	}
