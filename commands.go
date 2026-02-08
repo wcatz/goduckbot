@@ -13,7 +13,7 @@ import (
 	telebot "gopkg.in/tucnak/telebot.v2"
 )
 
-// registerCommands registers all Telegram bot command handlers.
+// registerCommands registers all Telegram bot command handlers and sets the command menu.
 func (i *Indexer) registerCommands() {
 	i.bot.Handle("/help", i.cmdHelp)
 	i.bot.Handle("/status", i.cmdStatus)
@@ -27,6 +27,26 @@ func (i *Indexer) registerCommands() {
 	i.bot.Handle("/ping", i.cmdPing)
 	i.bot.Handle("/duck", i.cmdDuck)
 	i.bot.Handle("/nextblock", i.cmdNextBlock)
+
+	// Register command menu with Telegram so users see / autocomplete
+	err := i.bot.SetCommands([]telebot.Command{
+		{Text: "help", Description: "Show available commands"},
+		{Text: "status", Description: "DB sync status"},
+		{Text: "tip", Description: "Current chain tip"},
+		{Text: "epoch", Description: "Current epoch info"},
+		{Text: "leaderlog", Description: "Leader schedule (next/current/epoch)"},
+		{Text: "nextblock", Description: "Next scheduled block"},
+		{Text: "nonce", Description: "Epoch nonce (next/current)"},
+		{Text: "validate", Description: "Check block hash on-chain"},
+		{Text: "stake", Description: "Pool & network stake"},
+		{Text: "blocks", Description: "Pool block count"},
+		{Text: "ping", Description: "Node connectivity check"},
+		{Text: "duck", Description: "Random duck pic"},
+	})
+	if err != nil {
+		log.Printf("Failed to set bot command menu: %v", err)
+	}
+
 	log.Println("Bot commands registered")
 }
 
@@ -551,7 +571,11 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
 		return
 	}
-	url := getDuckImage()
+	url, err := getDuckImage()
+	if err != nil {
+		i.bot.Send(m.Chat, fmt.Sprintf("Failed to fetch duck: %v", err))
+		return
+	}
 	photo := &telebot.Photo{File: telebot.FromURL(url)}
 	i.bot.Send(m.Chat, photo)
 }
