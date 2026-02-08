@@ -597,16 +597,17 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 		if i.nodeQuery != nil {
 			snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
 			if snapErr != nil {
-				reply(fmt.Sprintf("Failed to get stake: %v", snapErr))
-				return
+				log.Printf("NtC stake query failed, trying Koios fallback: %v", snapErr)
+			} else {
+				poolStake = snapshots.PoolStakeSet
+				totalStake = snapshots.TotalStakeSet
 			}
-			poolStake = snapshots.PoolStakeSet
-			totalStake = snapshots.TotalStakeSet
-		} else if i.koios != nil {
+		}
+		if poolStake == 0 && i.koios != nil {
 			epochNo := koios.EpochNo(currentEpoch)
 			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
 			if histErr != nil || len(poolHist.Data) == 0 {
-				reply("Failed to get stake from Koios")
+				reply("Failed to get stake from NtC and Koios")
 				return
 			}
 			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
@@ -616,13 +617,10 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 				return
 			}
 			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-		} else {
-			reply("No stake data source available")
-			return
+			log.Printf("Using Koios stake fallback for /nextblock")
 		}
-
-		if totalStake == 0 {
-			reply("Total stake is zero")
+		if poolStake == 0 || totalStake == 0 {
+			reply("No stake data available from NtC or Koios")
 			return
 		}
 
