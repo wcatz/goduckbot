@@ -102,7 +102,8 @@ type Indexer struct {
 	store            Store
 	nonceTracker     *NonceTracker
 	leaderlogMu      sync.Mutex
-	leaderlogCalcing map[int]bool // epochs currently being calculated
+	leaderlogCalcing map[int]bool      // epochs currently being calculated
+	leaderlogFailed  map[int]time.Time // cooldown: epoch -> last failure time
 	syncer           *ChainSyncer // nil in lite mode
 }
 
@@ -372,6 +373,7 @@ func (i *Indexer) Start() error {
 		fullMode := i.mode == "full"
 		i.nonceTracker = NewNonceTracker(i.store, i.koios, i.epoch, i.networkMagic, fullMode)
 		i.leaderlogCalcing = make(map[int]bool)
+		i.leaderlogFailed = make(map[int]time.Time)
 		log.Println("Nonce tracker initialized")
 
 		// Backfill nonce history in background
@@ -1062,20 +1064,31 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 			i.leaderlogMu.Unlock()
 			return
 		}
+		// Cooldown: don't retry for 15 minutes after a failed attempt
+		if failedAt, ok := i.leaderlogFailed[nextEpoch]; ok && time.Since(failedAt) < 15*time.Minute {
+			i.leaderlogMu.Unlock()
+			return
+		}
 		i.leaderlogCalcing[nextEpoch] = true
 		i.leaderlogMu.Unlock()
 
 		go func() {
-			i.calculateAndPostLeaderlog(nextEpoch)
+			success := i.calculateAndPostLeaderlog(nextEpoch)
 			i.leaderlogMu.Lock()
 			delete(i.leaderlogCalcing, nextEpoch)
+			if !success {
+				i.leaderlogFailed[nextEpoch] = time.Now()
+			} else {
+				delete(i.leaderlogFailed, nextEpoch)
+			}
 			i.leaderlogMu.Unlock()
 		}()
 	}
 }
 
 // calculateAndPostLeaderlog calculates the leader schedule and posts to Telegram.
-func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
+// Returns true on success, false on failure (used for cooldown tracking).
+func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 	log.Printf("Calculating leader schedule for epoch %d...", epoch)
 
 	// Wait a bit for data to settle
@@ -1088,7 +1101,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 	epochNonce, err := i.nonceTracker.GetNonceForEpoch(epoch)
 	if err != nil {
 		log.Printf("Failed to get nonce for epoch %d: %v", epoch, err)
-		return
+		return false
 	}
 
 	// Get pool + network stake (NtC mark snapshot first, Koios fallback)
@@ -1103,9 +1116,8 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 		}
 	}
 	if poolStake == 0 && i.koios != nil {
-		// Koios fallback: try current epoch first, then previous epoch
-		// (Koios may not have pool_history for an in-progress epoch)
-		for _, tryEpoch := range []int{epoch - 1, epoch - 2} {
+		// Koios fallback: try recent completed epochs (Koios may lag 1-2 epochs behind)
+		for _, tryEpoch := range []int{epoch - 1, epoch - 2, epoch - 3} {
 			epochNo := koios.EpochNo(tryEpoch)
 			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
 			if histErr != nil {
@@ -1130,7 +1142,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 	}
 	if poolStake == 0 || totalStake == 0 {
 		log.Printf("No stake data available for epoch %d (pool=%d, total=%d)", epoch, poolStake, totalStake)
-		return
+		return false
 	}
 
 	// Calculate schedule
@@ -1145,7 +1157,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 	)
 	if err != nil {
 		log.Printf("Failed to calculate leader schedule for epoch %d: %v", epoch, err)
-		return
+		return false
 	}
 
 	log.Printf("Epoch %d: %d slots assigned (expected %.2f)",
@@ -1163,7 +1175,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 		channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
 		if err != nil {
 			log.Printf("Failed to parse telegram channel ID: %v", err)
-			return
+			return false
 		}
 
 		chat := &telebot.Chat{ID: channelID}
@@ -1186,7 +1198,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 			}
 			if _, sendErr := i.bot.Send(chat, chunk); sendErr != nil {
 				log.Printf("Failed to send leaderlog to Telegram: %v", sendErr)
-				return
+				return false
 			}
 		}
 	}
@@ -1197,6 +1209,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 	}
 
 	log.Printf("Leader schedule for epoch %d posted", epoch)
+	return true
 }
 
 // makeSlotToTime returns a function that converts a slot number to a time.Time.
