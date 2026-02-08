@@ -32,6 +32,13 @@ twitter:
   # Credentials via env vars: TWITTER_API_KEY, TWITTER_API_KEY_SECRET,
   # TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET
 
+# Duck media for notifications and /duck command
+duck:
+  media: "both"      # "gif", "image", or "both" (default: both)
+  # customUrl: ""    # Override random-d.uk with your own hosted URL.
+                     # This interferes with core duckBot functionality
+                     # but if you must... quack.
+
 leaderlog:
   enabled: true
   vrfKeyPath: "/keys/vrf.skey"
