@@ -604,8 +604,8 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 			}
 		}
 		if poolStake == 0 && i.koios != nil {
-			// Try current epoch, then previous (Koios may not have in-progress epoch data)
-			for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1} {
+			// Try recent epochs (Koios may lag 1-2 epochs behind)
+			for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
 				epochNo := koios.EpochNo(tryEpoch)
 				poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
 				if histErr != nil || len(poolHist.Data) == 0 {
