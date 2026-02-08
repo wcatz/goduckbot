@@ -92,11 +92,9 @@ type Indexer struct {
 	// Mode: "lite" (adder tail + Koios) or "full" (historical sync + adder tail)
 	mode string
 	// Social network toggles
-	telegramEnabled    bool
-	telegramGifEnabled bool
-	twitterEnabled     bool
-	twitterGifEnabled  bool
-	twitterClient      *gotwi.Client
+	telegramEnabled bool
+	twitterEnabled  bool
+	twitterClient   *gotwi.Client
 	// Bot command access control
 	allowedUsers  map[int64]bool
 	allowedGroups map[int64]bool
@@ -227,13 +225,6 @@ func (i *Indexer) Start() error {
 		i.telegramEnabled = true
 	}
 
-	// GIF support toggle
-	i.telegramGifEnabled = viper.GetBool("telegram.gifEnabled")
-	// Default to true if not explicitly set
-	if !viper.IsSet("telegram.gifEnabled") {
-		i.telegramGifEnabled = true
-	}
-
 	// Initialize Telegram bot if enabled
 	if i.telegramEnabled {
 		var err error
@@ -284,13 +275,6 @@ func (i *Indexer) Start() error {
 	if !viper.IsSet("twitter.enabled") {
 		// Backward compatibility: enable if env vars are present
 		twitterConfigEnabled = true
-	}
-
-	// Twitter GIF support toggle
-	i.twitterGifEnabled = viper.GetBool("twitter.gifEnabled")
-	// Default to true if not explicitly set
-	if !viper.IsSet("twitter.gifEnabled") {
-		i.twitterGifEnabled = true
 	}
 
 	if twitterConfigEnabled {
@@ -749,10 +733,10 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			timeDiffString, i.epochBlocks, i.totalBlocks,
 			blockEvent.Context.BlockNumber, blockEvent.Payload.BlockHash)
 
-		// Get duck image URL for both Telegram and Twitter
-		duckImageURL, duckErr := getDuckImage()
-		if duckErr != nil {
-			log.Printf("failed to fetch duck image: %v", duckErr)
+		// Get random duck GIF for notifications
+		gifURL, gifErr := getRandomDuckGIF()
+		if gifErr != nil {
+			log.Printf("failed to fetch duck GIF: %v", gifErr)
 		}
 
 		// Send Telegram notification if enabled
@@ -762,39 +746,20 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				log.Printf("failed to parse telegram channel ID: %s", err)
 			} else {
 				chat := &telebot.Chat{ID: channelID}
-				sentSuccessfully := false
-
-				// Try to send GIF if enabled
-				if i.telegramGifEnabled {
-					gifURL, gifErr := fetchRandomDuckGIF()
-					if gifErr == nil && gifURL != "" {
-						animation := &telebot.Animation{
-							File:    telebot.FromURL(gifURL),
-							Caption: msg,
-						}
-						_, err = i.bot.Send(chat, animation)
-						if err != nil {
-							log.Printf("failed to send Telegram GIF, falling back to photo: %s", err)
-						} else {
-							sentSuccessfully = true
-						}
+				sent := false
+				if gifURL != "" {
+					animation := &telebot.Animation{
+						File:    telebot.FromURL(gifURL),
+						Caption: msg,
+					}
+					if _, err = i.bot.Send(chat, animation); err != nil {
+						log.Printf("failed to send Telegram GIF, sending text only: %s", err)
 					} else {
-						log.Printf("failed to fetch duck GIF, falling back to photo: %v", gifErr)
+						sent = true
 					}
 				}
-
-				// Fallback to photo (either GIF disabled or GIF send failed)
-				if !sentSuccessfully {
-					if duckImageURL != "" {
-						photo := &telebot.Photo{File: telebot.FromURL(duckImageURL), Caption: msg}
-						_, err = i.bot.Send(chat, photo)
-						if err != nil {
-							log.Printf("failed to send Telegram photo, sending text only: %s", err)
-							i.bot.Send(chat, msg)
-						}
-					} else {
-						i.bot.Send(chat, msg)
-					}
+				if !sent {
+					i.bot.Send(chat, msg)
 				}
 			}
 		}
@@ -812,17 +777,6 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 					"Lifetime Blocks: %d",
 				i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
 				timeDiffString, i.epochBlocks, i.totalBlocks)
-
-			// Fetch GIF URL if enabled, otherwise use empty string for text-only tweet
-			var gifURL string
-			if i.twitterGifEnabled {
-				fetchedGIF, gifErr := fetchRandomDuckGIF()
-				if gifErr != nil {
-					log.Printf("failed to fetch duck GIF for Twitter, posting text-only: %v", gifErr)
-				} else {
-					gifURL = fetchedGIF
-				}
-			}
 
 			if err := i.sendTweet(tweetMsg, gifURL); err != nil {
 				log.Printf("failed to send tweet: %s", err)
@@ -902,11 +856,11 @@ func handleMessages() {
 }
 
 // Get random duck image URL with timeout and safe error handling
-func getDuckImage() (string, error) {
+func getRandomDuckGIF() (string, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get("https://random-d.uk/api/v2/random")
+	resp, err := client.Get("https://random-d.uk/api/v2/random?type=gif")
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch duck image: %w", err)
+		return "", fmt.Errorf("failed to fetch duck GIF: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -916,40 +870,10 @@ func getDuckImage() (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to decode duck response: %w", err)
 	}
-	imageURL, ok := result["url"].(string)
-	if !ok || imageURL == "" {
-		return "", fmt.Errorf("no URL in duck API response")
-	}
-	return imageURL, nil
-}
-
-// fetchRandomDuckGIF fetches a random duck GIF from random-d.uk API with a timeout.
-// Returns the GIF URL or an error if the fetch fails.
-func fetchRandomDuckGIF() (string, error) {
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Get("https://random-d.uk/api/random?type=gif")
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch duck GIF: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("duck GIF API returned status %d", resp.StatusCode)
-	}
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode duck GIF response: %w", err)
-	}
-
 	gifURL, ok := result["url"].(string)
 	if !ok || gifURL == "" {
-		return "", fmt.Errorf("no GIF URL in response")
+		return "", fmt.Errorf("no URL in duck API response")
 	}
-
 	return gifURL, nil
 }
 
