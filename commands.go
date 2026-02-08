@@ -604,20 +604,25 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 			}
 		}
 		if poolStake == 0 && i.koios != nil {
-			epochNo := koios.EpochNo(currentEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr != nil || len(poolHist.Data) == 0 {
-				reply("Failed to get stake from NtC and Koios")
-				return
+			// Try current epoch, then previous (Koios may not have in-progress epoch data)
+			for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1} {
+				epochNo := koios.EpochNo(tryEpoch)
+				poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+				if histErr != nil || len(poolHist.Data) == 0 {
+					log.Printf("Koios GetPoolHistory(%d) empty or error: %v", tryEpoch, histErr)
+					continue
+				}
+				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+				epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+				if infoErr != nil || len(epochInfo.Data) == 0 {
+					log.Printf("Koios GetEpochInfo(%d) failed: %v", tryEpoch, infoErr)
+					poolStake = 0
+					continue
+				}
+				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+				log.Printf("Using Koios stake fallback for /nextblock (from epoch %d)", tryEpoch)
+				break
 			}
-			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr != nil || len(epochInfo.Data) == 0 {
-				reply("Failed to get epoch info from Koios")
-				return
-			}
-			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-			log.Printf("Using Koios stake fallback for /nextblock")
 		}
 		if poolStake == 0 || totalStake == 0 {
 			reply("No stake data available from NtC or Koios")
