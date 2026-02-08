@@ -642,15 +642,23 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
 		return
 	}
-	gifURL, err := getRandomDuckGIF()
+	mediaURL, isGif, err := i.getDuckMedia()
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Failed to fetch duck: %v", err))
 		return
 	}
-	animation := &telebot.Animation{File: telebot.FromURL(gifURL)}
-	if _, err := i.bot.Send(m.Chat, animation); err != nil {
-		log.Printf("failed to send duck GIF: %v", err)
-		i.bot.Send(m.Chat, gifURL)
+	if isGif {
+		animation := &telebot.Animation{File: telebot.FromURL(mediaURL)}
+		if _, err := i.bot.Send(m.Chat, animation); err != nil {
+			log.Printf("failed to send duck GIF: %v", err)
+			i.bot.Send(m.Chat, mediaURL)
+		}
+	} else {
+		photo := &telebot.Photo{File: telebot.FromURL(mediaURL)}
+		if _, err := i.bot.Send(m.Chat, photo); err != nil {
+			log.Printf("failed to send duck photo: %v", err)
+			i.bot.Send(m.Chat, mediaURL)
+		}
 	}
 }
 
