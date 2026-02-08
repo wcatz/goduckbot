@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -55,7 +54,7 @@ var timeDiffString string
 
 // Channel to broadcast block events to connected clients
 var clients = make(map[*websocket.Conn]bool) // connected clients
-var broadcast = make(chan interface{})        // broadcast channel
+var broadcast = make(chan interface{}, 100)    // broadcast channel (buffered to prevent deadlock)
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -104,6 +103,7 @@ type Indexer struct {
 	leaderlogMu      sync.Mutex
 	leaderlogCalcing map[int]bool      // epochs currently being calculated
 	leaderlogFailed  map[int]time.Time // cooldown: epoch -> last failure time
+	scheduleExists   map[int]bool      // cached: epoch -> schedule already in DB
 	syncer           *ChainSyncer // nil in lite mode
 }
 
@@ -374,6 +374,7 @@ func (i *Indexer) Start() error {
 		i.nonceTracker = NewNonceTracker(i.store, i.koios, i.epoch, i.networkMagic, fullMode)
 		i.leaderlogCalcing = make(map[int]bool)
 		i.leaderlogFailed = make(map[int]time.Time)
+		i.scheduleExists = make(map[int]bool)
 		log.Println("Nonce tracker initialized")
 
 		// Backfill nonce history in background
@@ -540,58 +541,74 @@ func (i *Indexer) flushBlockBatch(batch []BlockData) {
 }
 
 // startAdderPipeline starts the adder pipeline for live chain tail.
+// It runs an infinite restart loop: on pipeline error, it stops, waits, and reconnects.
+// Auto-reconnect is disabled because it orphans the event channel after reconnect.
 func (i *Indexer) startAdderPipeline() error {
 	hosts := i.nodeAddresses
-	for _, host := range hosts {
-		// Initialize the backoff strategy for each host attempt
-		bo := backoff.NewExponentialBackOff()
-		bo.MaxElapsedTime = maxRetryDuration
 
-		// Wrap the pipeline start in a function for the backoff operation
-		startPipelineFunc := func() error {
-			// Use the host to connect to the Cardano node
-			node := chainsync.WithAddress(host)
-			inputOpts := []chainsync.ChainSyncOptionFunc{
-				node,
-				chainsync.WithNetworkMagic(uint32(i.networkMagic)),
-				chainsync.WithIntersectTip(true),
-				chainsync.WithAutoReconnect(true),
-				chainsync.WithIncludeCbor(false),
+	for {
+		connected := false
+		for _, host := range hosts {
+			bo := backoff.NewExponentialBackOff()
+			bo.MaxElapsedTime = maxRetryDuration
+
+			startPipelineFunc := func() error {
+				node := chainsync.WithAddress(host)
+				inputOpts := []chainsync.ChainSyncOptionFunc{
+					node,
+					chainsync.WithNetworkMagic(uint32(i.networkMagic)),
+					chainsync.WithIntersectTip(true),
+					chainsync.WithAutoReconnect(false),
+					chainsync.WithIncludeCbor(false),
+				}
+
+				i.pipeline = pipeline.New()
+				input_chainsync := chainsync.New(inputOpts...)
+				i.pipeline.AddInput(input_chainsync)
+
+				filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block"}))
+				i.pipeline.AddFilter(filterEvent)
+
+				output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
+				i.pipeline.AddOutput(output)
+
+				err := i.pipeline.Start()
+				if err != nil {
+					log.Printf("Failed to start pipeline on %s: %s. Retrying...", host, err)
+					return err
+				}
+
+				return nil
 			}
 
-			i.pipeline = pipeline.New()
-			// Configure ChainSync input
-			input_chainsync := chainsync.New(inputOpts...)
-			i.pipeline.AddInput(input_chainsync)
-
-			// Configure filter to handle events
-			filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block"}))
-			i.pipeline.AddFilter(filterEvent)
-
-			// Configure embedded output with callback function
-			output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
-			i.pipeline.AddOutput(output)
-
-			err := i.pipeline.Start()
+			err := backoff.Retry(startPipelineFunc, bo)
 			if err != nil {
-				log.Printf("Failed to start pipeline on %s: %s. Retrying...", host, err)
-				return err
+				log.Printf("Failed to connect to node at %s after retries: %s", host, err)
+				continue
 			}
 
-			return nil
+			log.Printf("Pipeline connected to node at %s", host)
+			connected = true
+
+			// Block until pipeline error (connection drop without auto-reconnect = error)
+			pipelineErr := <-i.pipeline.ErrorChan()
+			log.Printf("Pipeline error: %s", pipelineErr)
+
+			// Stop the dead pipeline cleanly before restarting
+			if stopErr := i.pipeline.Stop(); stopErr != nil {
+				log.Printf("Pipeline stop error: %s", stopErr)
+			}
+			break // break inner host loop, restart from outer loop
 		}
 
-		// Use exponential backoff retry
-		err := backoff.Retry(startPipelineFunc, bo)
-		if err == nil {
-			log.Printf("Successfully connected to node at %s", host)
-			return nil
+		if !connected {
+			log.Println("Failed to connect to any host, retrying all in 30s...")
+			time.Sleep(30 * time.Second)
+		} else {
+			log.Println("Pipeline died, restarting in 5s...")
+			time.Sleep(5 * time.Second)
 		}
-		log.Printf("Failed to connect to node at %s after retries: %s", host, err)
 	}
-
-	log.Fatalf("Failed to start pipeline after trying all hosts")
-	return errors.New("Failed to start pipeline after trying all hosts")
 }
 
 func (i *Indexer) handleEvent(evt event.Event) error {
@@ -606,20 +623,23 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	// Marshal the event to JSON
 	data, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("error marshalling event: %v", err)
+		log.Printf("error marshalling event, skipping: %v", err)
+		return nil
 	}
 
 	// Unmarshal the event to get the block event details
 	var blockEvent BlockEvent
 	err = json.Unmarshal(data, &blockEvent)
 	if err != nil {
-		return fmt.Errorf("error unmarshalling block event: %v", err)
+		log.Printf("error unmarshalling block event, skipping: %v", err)
+		return nil
 	}
 
 	// Convert the block event timestamp to time.Time
 	blockEventTime, err := time.Parse(time.RFC3339, blockEvent.Timestamp)
 	if err != nil {
-		return fmt.Errorf("error parsing block event timestamp: %v", err)
+		log.Printf("error parsing block event timestamp, skipping: %v", err)
+		return nil
 	}
 
 	// Calculate the time difference between the current block event and the previous one
@@ -785,8 +805,12 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		}
 	}
 
-	// Send the block event to the WebSocket clients
-	broadcast <- blockEvent
+	// Send the block event to the WebSocket clients (non-blocking)
+	select {
+	case broadcast <- blockEvent:
+	default:
+		// drop if no consumers
+	}
 
 	return nil
 }
@@ -1059,8 +1083,17 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 			i.leaderlogMu.Unlock()
 			return
 		}
-		// Skip if schedule already exists in DB (computed or posted)
-		if existing, err := i.store.GetLeaderSchedule(context.Background(), nextEpoch); err == nil && existing != nil {
+		// Skip if schedule already cached as existing (no DB hit per block)
+		if i.scheduleExists[nextEpoch] {
+			i.leaderlogMu.Unlock()
+			return
+		}
+		// Check DB once per epoch (with timeout), then cache the result
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		existing, err := i.store.GetLeaderSchedule(ctx, nextEpoch)
+		cancel()
+		if err == nil && existing != nil {
+			i.scheduleExists[nextEpoch] = true
 			i.leaderlogMu.Unlock()
 			return
 		}
@@ -1080,6 +1113,7 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 				i.leaderlogFailed[nextEpoch] = time.Now()
 			} else {
 				delete(i.leaderlogFailed, nextEpoch)
+				i.scheduleExists[nextEpoch] = true
 			}
 			i.leaderlogMu.Unlock()
 		}()
