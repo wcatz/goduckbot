@@ -32,18 +32,32 @@ var shelleyIntersectPoints = map[int]intersectPoint{
 	PreprodNetworkMagic: {1598399, "7e16781b40ebf8b6da18f7b5e8ade855d6738095ef2f1c58c77e88b6e45997a4"},
 }
 
-// ChainSyncer performs full historical chain sync from Shelley genesis to tip
-// using the gouroboros NtN (Node-to-Node) ChainSync protocol.
+// LiveBlockInfo holds block data extracted from NtN block headers for live tail processing.
+type LiveBlockInfo struct {
+	Slot           uint64
+	Epoch          int
+	BlockHash      string
+	BlockNumber    uint64
+	IssuerVkeyHash string // 28-byte pool ID hex (Blake2b-224 of issuer vkey)
+	BlockBodySize  uint64
+	VrfOutput      []byte
+}
+
+// ChainSyncer performs chain sync from Shelley genesis (or resume point) to tip,
+// then continues as a live tail using the gouroboros NtN ChainSync protocol.
 type ChainSyncer struct {
 	store        Store
 	networkMagic int
 	nodeAddress  string
 	onBlock      func(slot uint64, epoch int, blockHash string, vrfOutput []byte)
+	onLiveBlock  func(LiveBlockInfo)
 	onCaughtUp   func()
+	startFromTip bool // skip historical sync, start from tip (lite mode)
 	conn         *ouroboros.Connection
 	blockssynced uint64 // atomic counter for progress logging
 	tipSlot      uint64 // atomic: current tip slot for progress tracking
 	caughtUp     atomic.Bool
+	lastBlockTime atomic.Int64 // unix timestamp of last block (for watchdog)
 	// Progress tracking
 	syncStart    time.Time
 	lastLogTime  time.Time
@@ -52,21 +66,27 @@ type ChainSyncer struct {
 	currentEpoch int
 }
 
-// NewChainSyncer creates a new historical chain syncer.
+// NewChainSyncer creates a chain syncer that handles both historical sync and live tail.
 func NewChainSyncer(store Store, networkMagic int, nodeAddress string,
 	onBlock func(slot uint64, epoch int, blockHash string, vrfOutput []byte),
+	onLiveBlock func(LiveBlockInfo),
 	onCaughtUp func(),
+	startFromTip bool,
 ) *ChainSyncer {
 	return &ChainSyncer{
 		store:        store,
 		networkMagic: networkMagic,
 		nodeAddress:  nodeAddress,
 		onBlock:      onBlock,
+		onLiveBlock:  onLiveBlock,
 		onCaughtUp:   onCaughtUp,
+		startFromTip: startFromTip,
 	}
 }
 
-// Start begins the historical chain sync. It blocks until sync completes or ctx is cancelled.
+// Start begins chain sync and blocks until error or ctx cancellation.
+// After catching up to the tip, it continues as a live tail (does not stop).
+// A watchdog goroutine force-closes the connection if no block arrives for 5 minutes.
 func (s *ChainSyncer) Start(ctx context.Context) error {
 	// Determine intersect point
 	intersectPoints, err := s.getIntersectPoints(ctx)
@@ -74,7 +94,11 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 		return fmt.Errorf("getting intersect points: %w", err)
 	}
 
-	log.Printf("Starting historical chain sync from slot %d", intersectPoints[0].Slot)
+	if s.startFromTip {
+		log.Printf("Starting chain sync from tip")
+	} else {
+		log.Printf("Starting chain sync from slot %d", intersectPoints[0].Slot)
+	}
 
 	// Configure ChainSync callbacks
 	chainSyncCfg := chainsync.NewConfig(
@@ -101,7 +125,22 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 		return fmt.Errorf("connecting to %s: %w", s.nodeAddress, err)
 	}
 
-	log.Printf("Connected to node at %s for historical sync", s.nodeAddress)
+	log.Printf("Connected to node at %s", s.nodeAddress)
+
+	// Seed lastBlockTime so watchdog doesn't fire immediately
+	s.lastBlockTime.Store(time.Now().Unix())
+
+	// Lite mode: find current tip and start from there
+	if s.startFromTip {
+		tip, tipErr := conn.ChainSync().Client.GetCurrentTip()
+		if tipErr != nil {
+			conn.Close()
+			return fmt.Errorf("getting current tip: %w", tipErr)
+		}
+		intersectPoints = []pcommon.Point{tip.Point}
+		s.caughtUp.Store(true)
+		log.Printf("Starting from tip at slot %d", tip.Point.Slot)
+	}
 
 	// Start chain sync from intersect point
 	if err := conn.ChainSync().Client.Sync(intersectPoints); err != nil {
@@ -109,17 +148,42 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 		return fmt.Errorf("starting chain sync: %w", err)
 	}
 
-	// Wait for sync to complete, error, or context cancellation
+	// Watchdog: force-close connection if no block for 5 minutes
+	done := make(chan struct{})
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if !s.caughtUp.Load() {
+					continue // don't watchdog during historical sync
+				}
+				stale := time.Since(time.Unix(s.lastBlockTime.Load(), 0))
+				if stale > 5*time.Minute {
+					log.Printf("[watchdog] no block for %s, forcing reconnect", stale.Round(time.Second))
+					conn.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	// Block until error or context cancellation
 	select {
 	case <-ctx.Done():
+		close(done)
 		conn.Close()
+		<-watchdogDone
 		return ctx.Err()
 	case err := <-errChan:
+		close(done)
 		conn.Close()
-		if s.caughtUp.Load() {
-			// Caught up and connection closed — this is expected
-			return nil
-		}
+		<-watchdogDone
 		return fmt.Errorf("chain sync error: %w", err)
 	}
 }
@@ -133,13 +197,15 @@ func (s *ChainSyncer) Stop() {
 
 // getIntersectPoints determines where to start syncing from.
 func (s *ChainSyncer) getIntersectPoints(ctx context.Context) ([]pcommon.Point, error) {
+	// Lite mode or no store: start from origin (ChainSync intersects at tip)
+	if s.startFromTip || s.store == nil {
+		return []pcommon.Point{pcommon.NewPointOrigin()}, nil
+	}
+
 	// Check if we have existing data to resume from
 	lastSlot, err := s.store.GetLastSyncedSlot(ctx)
 	if err == nil && lastSlot > 0 {
 		log.Printf("Resuming sync from last synced slot %d", lastSlot)
-		// We need the block hash for the intersect point.
-		// Use origin + known point for a safe resume.
-		// The node will find the best intersection.
 		point, err := s.getIntersectForSlot(ctx, lastSlot)
 		if err == nil {
 			return []pcommon.Point{point}, nil
@@ -239,12 +305,46 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 		return nil
 	}
 
-	// Deliver to callback
+	// Update watchdog timestamp
+	s.lastBlockTime.Store(now.Unix())
+
+	// Check if caught up (within 120 slots / ~2 minutes of tip).
+	// Must happen BEFORE callback dispatch so the transition block
+	// goes to exactly one path (onLiveBlock), not both.
+	if !s.caughtUp.Load() && tip.Point.Slot > 0 && slot+120 >= tip.Point.Slot {
+		s.caughtUp.Store(true)
+		if !s.syncStart.IsZero() {
+			elapsed := time.Since(s.syncStart)
+			count := atomic.LoadUint64(&s.blockssynced)
+			avgBlkSec := float64(count) / elapsed.Seconds()
+			log.Printf("[sync] caught up in %s | %d blocks | avg %.0f blk/s",
+				elapsed.Round(time.Second), count, avgBlkSec)
+		}
+		if s.onCaughtUp != nil {
+			s.onCaughtUp()
+		}
+	}
+
+	// Dispatch to exactly one callback: onLiveBlock after caught up, onBlock during historical sync.
+	if s.caughtUp.Load() {
+		if s.onLiveBlock != nil {
+			s.onLiveBlock(LiveBlockInfo{
+				Slot:           slot,
+				Epoch:          epoch,
+				BlockHash:      blockHash,
+				BlockNumber:    header.BlockNumber(),
+				IssuerVkeyHash: header.IssuerVkey().Hash().String(),
+				BlockBodySize:  header.BlockBodySize(),
+				VrfOutput:      vrfOutput,
+			})
+		}
+		return nil
+	}
 	if s.onBlock != nil {
 		s.onBlock(slot, epoch, blockHash, vrfOutput)
 	}
 
-	// Log progress every 5,000 blocks
+	// Historical sync: log progress every 5,000 blocks
 	count := atomic.AddUint64(&s.blockssynced, 1)
 	if count%5000 == 0 {
 		tipSlot := atomic.LoadUint64(&s.tipSlot)
@@ -254,7 +354,6 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 		}
 		elapsed := now.Sub(s.syncStart)
 		sinceLastLog := now.Sub(s.lastLogTime)
-		// Speed in slots/sec (more meaningful than blocks/sec for ETA)
 		var slotsPerSec float64
 		var eta time.Duration
 		if sinceLastLog.Seconds() > 0 && slot > s.lastLogSlot {
@@ -271,18 +370,6 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 
 		s.lastLogTime = now
 		s.lastLogSlot = slot
-	}
-
-	// Check if caught up (within 120 slots / ~2 minutes of tip)
-	if !s.caughtUp.Load() && tip.Point.Slot > 0 && slot+120 >= tip.Point.Slot {
-		s.caughtUp.Store(true)
-		elapsed := time.Since(s.syncStart)
-		avgBlkSec := float64(count) / elapsed.Seconds()
-		log.Printf("[sync] caught up in %s | %d blocks | avg %.0f blk/s",
-			elapsed.Round(time.Second), count, avgBlkSec)
-		if s.onCaughtUp != nil {
-			go s.onCaughtUp()
-		}
 	}
 
 	return nil
