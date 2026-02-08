@@ -386,3 +386,7 @@ The adder pipeline handles reconnection at the outer level — duckBot wraps it 
 ## License
 
 MIT
+
+---
+
+Built by [Wael](https://github.com/wcatz)
