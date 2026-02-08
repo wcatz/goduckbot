@@ -343,7 +343,7 @@ func (i *Indexer) Start() error {
 	}
 
 	i.epoch = getCurrentEpoch()
-	fmt.Println("Epoch: ", i.epoch)
+	log.Printf("Epoch: %d", i.epoch)
 
 	// Initialize leaderlog if enabled
 	i.leaderlogEnabled = viper.GetBool("leaderlog.enabled")
@@ -390,7 +390,6 @@ func (i *Indexer) Start() error {
 	bech32PoolId, err := convertToBech32(i.poolId)
 	if err != nil {
 		log.Printf("failed to convert pool id to Bech32: %s", err)
-		fmt.Println("PoolId: ", bech32PoolId)
 	}
 
 	// Set the bech32PoolId field in the Indexer
@@ -407,14 +406,12 @@ func (i *Indexer) Start() error {
 
 	if epochBlocks.Data != nil {
 		i.epochBlocks = len(epochBlocks.Data)
-		fmt.Println("Epoch Blocks: ", i.epochBlocks)
 	} else {
 		log.Fatalf("failed to get pool epoch blocks: %s", err)
 	}
 
 	if lifetimeBlocks.Data != nil {
 		i.totalBlocks = lifetimeBlocks.Data.BlockCount
-		fmt.Println("Total Blocks: ", i.totalBlocks)
 	} else {
 		log.Fatalf("failed to get pool lifetime blocks: %s", err)
 	}
@@ -624,13 +621,17 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	}
 
 	// Calculate the time difference between the current block event and the previous one
-	timeDiff := blockEventTime.Sub(prevBlockTimestamp)
-	if timeDiff.Seconds() < 60 {
-		timeDiffString = fmt.Sprintf("%.0fs", timeDiff.Seconds())
+	if prevBlockTimestamp.IsZero() {
+		timeDiffString = "first"
 	} else {
-		minutes := int(timeDiff.Minutes())
-		seconds := int(timeDiff.Seconds()) - (minutes * 60)
-		timeDiffString = fmt.Sprintf("%dm%02ds", minutes, seconds)
+		timeDiff := blockEventTime.Sub(prevBlockTimestamp)
+		if timeDiff.Seconds() < 60 {
+			timeDiffString = fmt.Sprintf("%.0fs", timeDiff.Seconds())
+		} else {
+			minutes := int(timeDiff.Minutes())
+			seconds := int(timeDiff.Seconds()) - (minutes * 60)
+			timeDiffString = fmt.Sprintf("%dm%02ds", minutes, seconds)
+		}
 	}
 
 	// Update the previous block event timestamp with the current one
@@ -1089,21 +1090,37 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 		return
 	}
 
-	// Get pool + network stake from node (mark snapshot for next epoch)
-	if i.nodeQuery == nil {
-		log.Printf("Node query not configured, cannot calculate leaderlog")
-		return
+	// Get pool + network stake (NtC mark snapshot first, Koios fallback)
+	var poolStake, totalStake uint64
+	if i.nodeQuery != nil {
+		snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
+		if snapErr != nil {
+			log.Printf("NtC stake query failed for auto-leaderlog, trying Koios: %v", snapErr)
+		} else {
+			poolStake = snapshots.PoolStakeMark
+			totalStake = snapshots.TotalStakeMark
+		}
 	}
-	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ctx, i.bech32PoolId)
-	if err != nil {
-		log.Printf("Failed to get stake snapshots for leaderlog: %v", err)
-		return
+	if poolStake == 0 && i.koios != nil {
+		// Koios fallback: use current epoch's active stake as approximation
+		currentEpoch := epoch - 1
+		epochNo := koios.EpochNo(currentEpoch)
+		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+		if histErr != nil || len(poolHist.Data) == 0 {
+			log.Printf("Failed to get stake from NtC and Koios for epoch %d", epoch)
+			return
+		}
+		poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+		if infoErr != nil || len(epochInfo.Data) == 0 {
+			log.Printf("Failed to get epoch info from Koios for epoch %d", epoch)
+			return
+		}
+		totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+		log.Printf("Using Koios stake fallback for epoch %d leaderlog (approx from epoch %d set snapshot)", epoch, currentEpoch)
 	}
-	poolStake := snapshots.PoolStakeMark
-	totalStake := snapshots.TotalStakeMark
-
 	if poolStake == 0 || totalStake == 0 {
-		log.Printf("Invalid stake values: pool=%d, total=%d", poolStake, totalStake)
+		log.Printf("No stake data available for epoch %d (pool=%d, total=%d)", epoch, poolStake, totalStake)
 		return
 	}
 
