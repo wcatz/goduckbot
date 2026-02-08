@@ -290,11 +290,11 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 				ntcAvailable = false
 			}
 			if ntcAvailable {
-				ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Second)
+				ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
 				snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 				ntcCancel()
 				if snapErr != nil {
-					log.Printf("NtC stake query for epoch %d failed (socat stalled): %v", targetEpoch, snapErr)
+					log.Printf("NtC stake query for epoch %d failed: %v", targetEpoch, snapErr)
 				} else {
 					switch snap {
 					case SnapshotMark:
