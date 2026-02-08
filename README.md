@@ -390,3 +390,5 @@ MIT
 ---
 
 Built by [Wael](https://github.com/wcatz)
+
+Early duckBot development by [AstroWa3l](https://github.com/AstroWa3l) — a certified Proof of Stake for not visiting when he's only 3.5 hours away.
