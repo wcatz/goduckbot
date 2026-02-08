@@ -38,6 +38,10 @@ config:
     client_id: ""
     client_secret: ""
 
+  duck:
+    media: "both"
+    customUrl: ""
+
   leaderlog:
     enabled: false
     vrfKeyPath: "/keys/vrf.skey"
