@@ -13,6 +13,16 @@ import (
 	telebot "gopkg.in/tucnak/telebot.v2"
 )
 
+// Inline keyboard buttons for commands with subcommands
+var (
+	btnLeaderlogNext    = telebot.InlineButton{Unique: "ll_next", Text: "\U0001F4C5 Next Epoch"}
+	btnLeaderlogCurrent = telebot.InlineButton{Unique: "ll_current", Text: "\U0001F4C6 Current Epoch"}
+	btnNonceNext        = telebot.InlineButton{Unique: "nonce_next", Text: "\U0001F511 Next"}
+	btnNonceCurrent     = telebot.InlineButton{Unique: "nonce_current", Text: "\U0001F512 Current"}
+	btnDuckGif          = telebot.InlineButton{Unique: "duck_gif", Text: "\U0001F3AC GIF"}
+	btnDuckImg          = telebot.InlineButton{Unique: "duck_img", Text: "\U0001F4F7 Image"}
+)
+
 // registerCommands registers all Telegram bot command handlers and sets the command menu.
 func (i *Indexer) registerCommands() {
 	i.bot.Handle("/help", i.cmdHelp)
@@ -29,6 +39,50 @@ func (i *Indexer) registerCommands() {
 	i.bot.Handle("/nextblock", i.cmdNextBlock)
 	i.bot.Handle("/version", i.cmdVersion)
 
+	// Inline keyboard callback handlers
+	i.bot.Handle(&btnLeaderlogNext, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Payload = "next"
+		m.Sender = c.Sender
+		i.cmdLeaderlog(m)
+	})
+	i.bot.Handle(&btnLeaderlogCurrent, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Payload = "current"
+		m.Sender = c.Sender
+		i.cmdLeaderlog(m)
+	})
+	i.bot.Handle(&btnNonceNext, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Payload = "next"
+		m.Sender = c.Sender
+		i.cmdNonce(m)
+	})
+	i.bot.Handle(&btnNonceCurrent, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Payload = "current"
+		m.Sender = c.Sender
+		i.cmdNonce(m)
+	})
+	i.bot.Handle(&btnDuckGif, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Payload = "gif"
+		m.Sender = c.Sender
+		i.cmdDuck(m)
+	})
+	i.bot.Handle(&btnDuckImg, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Payload = "img"
+		m.Sender = c.Sender
+		i.cmdDuck(m)
+	})
+
 	// Register command menu with Telegram so users see / autocomplete
 	err := i.bot.SetCommands([]telebot.Command{
 		{Text: "help", Description: "Show available commands"},
@@ -42,7 +96,7 @@ func (i *Indexer) registerCommands() {
 		{Text: "stake", Description: "Pool & network stake"},
 		{Text: "blocks", Description: "Pool block count"},
 		{Text: "ping", Description: "Node connectivity check"},
-		{Text: "duck", Description: "Random duck pic (gif|img)"},
+		{Text: "duck", Description: "Random duck (gif|img)"},
 		{Text: "version", Description: "Bot version info"},
 	})
 	if err != nil {
@@ -180,7 +234,7 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 		return
 	}
 
-	epoch := getCurrentEpoch()
+	epoch := i.getCurrentEpoch()
 	epochStart := GetEpochStartSlot(epoch, i.networkMagic)
 	epochLen := GetEpochLength(i.networkMagic)
 
@@ -228,15 +282,26 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 
 	args := strings.TrimSpace(m.Payload)
 
-	// Parse argument: "next" (default), "current", or epoch number
+	// No args: show inline keyboard
+	if args == "" {
+		markup := &telebot.ReplyMarkup{
+			InlineKeyboard: [][]telebot.InlineButton{
+				{btnLeaderlogNext, btnLeaderlogCurrent},
+			},
+		}
+		i.bot.Send(m.Chat, "\U0001F4CB Leader Schedule — choose epoch:", markup)
+		return
+	}
+
+	// Parse argument: "next", "current", or epoch number
 	var targetEpoch int
 	var snapType SnapshotType
 	switch {
-	case args == "" || args == "next":
-		targetEpoch = getCurrentEpoch() + 1
+	case args == "next":
+		targetEpoch = i.getCurrentEpoch() + 1
 		snapType = SnapshotMark
 	case args == "current":
-		targetEpoch = getCurrentEpoch()
+		targetEpoch = i.getCurrentEpoch()
 		snapType = SnapshotSet
 	default:
 		parsed, err := strconv.Atoi(args)
@@ -275,7 +340,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 
 		// Try NtC first if epoch is within snapshot range (mark/set/go)
 		var poolStake, totalStake uint64
-		curEpoch := getCurrentEpoch()
+		curEpoch := i.getCurrentEpoch()
 		if i.nodeQuery != nil {
 			var snap SnapshotType
 			ntcAvailable := true
@@ -439,7 +504,19 @@ func (i *Indexer) cmdNonce(m *telebot.Message) {
 	}
 
 	args := strings.TrimSpace(m.Payload)
-	epoch := getCurrentEpoch()
+
+	// No args: show inline keyboard
+	if args == "" {
+		markup := &telebot.ReplyMarkup{
+			InlineKeyboard: [][]telebot.InlineButton{
+				{btnNonceCurrent, btnNonceNext},
+			},
+		}
+		i.bot.Send(m.Chat, "\U0001F511 Epoch Nonce — choose:", markup)
+		return
+	}
+
+	epoch := i.getCurrentEpoch()
 	label := "current"
 	if args == "next" {
 		epoch = epoch + 1
@@ -533,7 +610,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	// Koios fallback
 	if poolStake == 0 && i.koios != nil {
 		source = "Koios (NtC socat stalled)"
-		currentEpoch := getCurrentEpoch()
+		currentEpoch := i.getCurrentEpoch()
 		for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
 			epochNo := koios.EpochNo(tryEpoch)
 			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
@@ -573,7 +650,7 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 	}
 
 	args := strings.TrimSpace(m.Payload)
-	epoch := getCurrentEpoch()
+	epoch := i.getCurrentEpoch()
 	if args != "" {
 		parsed, err := strconv.Atoi(args)
 		if err != nil {
@@ -598,7 +675,7 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 	}
 
 	// Current epoch: use in-memory counter
-	if epoch == getCurrentEpoch() {
+	if epoch == i.getCurrentEpoch() {
 		msg := fmt.Sprintf("\U0001F4E6 Blocks \u2014 Epoch %d\n\n"+
 			"Minted this epoch: %d\n",
 			epoch, i.epochBlocks)
@@ -661,15 +738,22 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 		i.bot.Send(m.Chat, fmt.Sprintf("Failed to fetch duck: %v", err))
 		return
 	}
+
+	markup := &telebot.ReplyMarkup{
+		InlineKeyboard: [][]telebot.InlineButton{
+			{btnDuckGif, btnDuckImg},
+		},
+	}
+
 	if isGif {
 		animation := &telebot.Animation{File: telebot.FromURL(mediaURL)}
-		if _, err := i.bot.Send(m.Chat, animation); err != nil {
+		if _, err := i.bot.Send(m.Chat, animation, markup); err != nil {
 			log.Printf("failed to send duck GIF: %v", err)
 			i.bot.Send(m.Chat, mediaURL)
 		}
 	} else {
 		photo := &telebot.Photo{File: telebot.FromURL(mediaURL)}
-		if _, err := i.bot.Send(m.Chat, photo); err != nil {
+		if _, err := i.bot.Send(m.Chat, photo, markup); err != nil {
 			log.Printf("failed to send duck photo: %v", err)
 			i.bot.Send(m.Chat, mediaURL)
 		}
@@ -686,7 +770,7 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 		return
 	}
 
-	currentEpoch := getCurrentEpoch()
+	currentEpoch := i.getCurrentEpoch()
 
 	// Try DB first with short timeout
 	ctxShort, cancelShort := context.WithTimeout(context.Background(), 10*time.Second)

@@ -124,22 +124,32 @@ type BlockEvent struct {
 	Payload   event.BlockEvent   `json:"payload"`
 }
 
-// Function to calculate the current epoch number
-func getCurrentEpoch() int {
-	// Parse the Shelley epoch start time
-	shelleyStartTime, err := time.Parse(time.RFC3339, ShelleyEpochStart)
-	if err != nil {
-		fmt.Println("Error parsing Shelley start time:", err)
-		return -1
-	}
-	// Calculate the elapsed time since Shelley start in seconds
-	elapsedSeconds := time.Since(shelleyStartTime).Seconds()
-	// Calculate the number of epochs elapsed
-	epochsElapsed := int(elapsedSeconds / (EpochDurationInDays * SecondsInDay))
-	// Calculate the current epoch number
-	currentEpoch := StartingEpoch + epochsElapsed
+// getCurrentEpoch calculates the current epoch number based on networkMagic.
+func (i *Indexer) getCurrentEpoch() int {
+	now := time.Now().UTC()
 
-	return currentEpoch
+	switch i.networkMagic {
+	case PreprodNetworkMagic:
+		genesis, _ := time.Parse(time.RFC3339, "2022-06-01T00:00:00Z")
+		elapsed := now.Sub(genesis).Seconds()
+		byronDuration := float64(PreprodShelleyStartEpoch) * float64(ByronEpochLength) * 20 // 20s Byron slots
+		if elapsed < byronDuration {
+			return int(elapsed / (float64(ByronEpochLength) * 20))
+		}
+		shelleySeconds := elapsed - byronDuration
+		return PreprodShelleyStartEpoch + int(shelleySeconds/float64(MainnetEpochLength))
+
+	case PreviewNetworkMagic:
+		genesis, _ := time.Parse(time.RFC3339, "2022-11-01T00:00:00Z")
+		elapsed := now.Sub(genesis).Seconds()
+		return int(elapsed / float64(PreviewEpochLength))
+
+	default: // mainnet
+		shelleyStartTime, _ := time.Parse(time.RFC3339, ShelleyEpochStart)
+		elapsedSeconds := now.Sub(shelleyStartTime).Seconds()
+		epochsElapsed := int(elapsedSeconds / (EpochDurationInDays * SecondsInDay))
+		return StartingEpoch + epochsElapsed
+	}
 }
 
 // initStore creates the appropriate Store based on config.
@@ -344,7 +354,7 @@ func (i *Indexer) Start() error {
 		}
 	}
 
-	i.epoch = getCurrentEpoch()
+	i.epoch = i.getCurrentEpoch()
 	log.Printf("Epoch: %d", i.epoch)
 
 	// Initialize leaderlog if enabled
@@ -696,7 +706,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	}
 
 	// Check if the epoch has changed
-	currentEpoch := getCurrentEpoch()
+	currentEpoch := i.getCurrentEpoch()
 	if currentEpoch != i.epoch {
 		i.epoch = currentEpoch
 		i.epochBlocks = 0
