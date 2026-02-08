@@ -30,15 +30,27 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 | `/status` | DB sync status |
 | `/tip` | Current chain tip |
 | `/epoch` | Epoch progress and time remaining |
-| `/leaderlog [next\|current\|<epoch>]` | Leader schedule |
+| `/leaderlog [next\|current\|<epoch>]` | Leader schedule (inline buttons) |
 | `/nextblock` | Next scheduled block slot and time |
-| `/nonce [next\|current]` | Epoch nonce |
+| `/nonce [next\|current]` | Epoch nonce (inline buttons) |
 | `/validate <hash>` | Check block in local DB |
 | `/stake` | Pool and network stake |
 | `/blocks [epoch]` | Pool block count |
 | `/ping` | Node connectivity check |
-| `/duck` | Random duck pic |
+| `/duck [gif\|img]` | Random duck pic (inline buttons) |
 | `/version` | Bot version info |
+
+Commands with subcommands (`/leaderlog`, `/nonce`, `/duck`) show inline keyboard buttons when called without arguments.
+
+## Supported Networks
+
+Set `networkMagic` in your `config.yaml` for your network. Epoch calculations, Koios API endpoints, and block explorer links adjust automatically.
+
+| Network | Magic | Epoch Length |
+| ------- | ----- | ------------ |
+| Mainnet | `764824073` | 5 days (432,000 slots) |
+| Preprod | `1` | 5 days (432,000 slots) |
+| Preview | `2` | 1 day (86,400 slots) |
 
 ## Quick Start (Lite Mode)
 
@@ -83,7 +95,7 @@ ticker: "DUCK"
 poolName: "My Pool"
 nodeAddress:
   host1: "your-node:3001"
-networkMagic: 764824073
+networkMagic: 764824073    # mainnet. preprod=1, preview=2
 
 telegram:
   enabled: true
@@ -183,14 +195,6 @@ Single binary, all Go, no CGO.
 | `localquery.go` | NtC local state query client |
 | `store.go` | Store interface + SQLite implementation |
 | `db.go` | PostgreSQL implementation |
-
-## Supported Networks
-
-| Network | Magic |
-| ------- | ----- |
-| Mainnet | `764824073` |
-| Preprod | `1` |
-| Preview | `2` |
 
 ## License
 
