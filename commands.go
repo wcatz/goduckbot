@@ -642,13 +642,16 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
 		return
 	}
-	url, err := getDuckImage()
+	gifURL, err := getRandomDuckGIF()
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Failed to fetch duck: %v", err))
 		return
 	}
-	photo := &telebot.Photo{File: telebot.FromURL(url)}
-	i.bot.Send(m.Chat, photo)
+	animation := &telebot.Animation{File: telebot.FromURL(gifURL)}
+	if _, err := i.bot.Send(m.Chat, animation); err != nil {
+		log.Printf("failed to send duck GIF: %v", err)
+		i.bot.Send(m.Chat, gifURL)
+	}
 }
 
 func (i *Indexer) cmdNextBlock(m *telebot.Message) {
