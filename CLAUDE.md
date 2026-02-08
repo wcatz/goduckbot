@@ -6,7 +6,8 @@ Cardano stake pool notification bot with chain sync and built-in CPRAOS leaderlo
 
 | File | Purpose |
 |------|---------|
-| `main.go` | Core: config, chain sync pipeline, block notifications, leaderlog orchestration, mode/social toggles, batch processing goroutine |
+| `main.go` | Core: config, adder pipeline, block notifications, leaderlog orchestration, mode/social toggles, batch processing goroutine |
+| `commands.go` | Telegram bot command handlers, inline keyboard buttons (`btnLeaderlogNext`, `btnNonceNext`, `btnDuckGif`, etc.), callback routing |
 | `leaderlog.go` | CPRAOS leader schedule calculation, VRF key parsing, epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
 | `nonce.go` | Nonce evolution tracker (VRF accumulation per block, genesis-seeded or zero-seeded), batch processing (`ProcessBatch`) |
 | `store.go` | `Store` interface + SQLite implementation (`SqliteStore` via `modernc.org/sqlite`, pure Go, no CGO) |
@@ -63,11 +64,15 @@ type Store interface {
 All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 
 ## Features
-- Real-time block notifications via Telegram/Twitter (with duck images)
+- Real-time block notifications via Telegram/Twitter (with duck GIFs/images)
+- Configurable duck media: `duck.media` = "gif", "img", or "both"
+- Inline keyboard buttons for `/leaderlog`, `/nonce`, `/duck` subcommands
 - Social network toggles: `telegram.enabled`, `twitter.enabled` in config
 - Chain sync using blinklabs-io/adder with auto-reconnect and host failover
 - Built-in CPRAOS leaderlog calculation (replaces cncli sidecar)
+- Multi-network epoch calculation (mainnet, preprod, preview)
 - VRF nonce evolution tracked per block in SQLite or PostgreSQL
+- NtC local state query for direct stake snapshots (mark/set/go)
 - Koios API integration for stake data and nonce fallback
 - WebSocket broadcast for block events
 - Telegram message chunking for messages >4096 chars
@@ -188,12 +193,14 @@ database:
 
 **Note:** Database password uses `net/url.URL` for URL-safe encoding in connection strings. Passwords with special characters (`@`, `:`, `/`) are handled correctly.
 
-## Helm Chart (v0.3.0)
+## Helm Chart (v0.7.15)
 
 Key values:
 - `config.mode` — "lite" (default) or "full"
 - `config.telegram.enabled` / `config.twitter.enabled` — social network toggles (env vars conditionally injected)
 - `config.leaderlog.enabled` — enables VRF tracking and schedule calculation
+- `config.duck.media` — "gif", "img", or "both" (default)
+- `config.duck.customUrl` — optional custom duck image URL
 - `config.database.driver` — "sqlite" (default) or "postgres"
 - `config.database.path` — SQLite file path (default `/data/goduckbot.db`)
 - `persistence.enabled` — creates PVC for SQLite data when `database.driver=sqlite`
@@ -206,19 +213,23 @@ Multi-stage build: `golang:1.24-bookworm` builder + `debian:bookworm-slim` runti
 
 ## Build & Deploy
 
+CI/CD handles Docker images AND helm charts on merge to master. NEVER build locally.
+
 ```bash
-# Build
+# Build locally (dev only)
 CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o goduckbot .
 
-# Docker
-docker buildx build --platform linux/amd64,linux/arm64 -t wcatz/goduckbot:latest --push .
+# CI builds on merge to master:
+#   - Docker: wcatz/goduckbot:latest, wcatz/goduckbot:master
+#   - Helm: oci://ghcr.io/wcatz/helm-charts/goduckbot
 
-# Helm package + push
-helm package helm-chart/ --version 0.3.0
-helm push goduckbot-0.3.0.tgz oci://ghcr.io/wcatz/helm-charts
+# Versioned tags require git tag:
+git tag v2.5.0 && git push origin v2.5.0
+#   - Docker: wcatz/goduckbot:2.5.0, wcatz/goduckbot:2.5, wcatz/goduckbot:2
+#   - Helm chart published with matching version
 
 # Deploy via helmfile (from infra repo)
-helmfile -e apps -l app=duckbot apply
+helmfile -e apps -l app=goduckbot apply
 ```
 
 ## Tests
@@ -236,7 +247,7 @@ Test files:
 
 ## Key Dependencies
 - `blinklabs-io/adder` v0.37.0 — live chain tail (must match gouroboros version)
-- `blinklabs-io/gouroboros` v0.153.0 — VRF, block headers, ledger types, NtN ChainSync, era-specific header types
+- `blinklabs-io/gouroboros` v0.153.1 — VRF (ECVRF-ED25519-SHA512-Elligator2), NtN ChainSync, NtC LocalStateQuery, ledger types
 - `modernc.org/sqlite` — pure Go SQLite (no CGO required)
 - `jackc/pgx/v5` — PostgreSQL driver with COPY protocol support for bulk inserts
 - `cardano-community/koios-go-client/v3` — Koios API
@@ -361,12 +372,15 @@ InsertBlock(ctx, ...) (bool, error)  // returns (inserted bool, err)
 
 ### Current K8s Deployment State
 
-- **Pod**: `goduckbot` on `k3s-mini-1` (co-located with postgres primary k3s-postgres-2)
-- **Node address**: `cardano-node-mainnet-mobile2.cardano.svc.cluster.local:3001` (k3s-mobile-2, same LAN as mini-1)
-- **Fallback**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:3001`
+- **Pod**: `goduckbot` on `k3s-control-1`
+- **Node address**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:3001`
+- **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000` (same-node socat, no WireGuard)
 - **DB**: PostgreSQL on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
 - **Mode**: full, leaderlog enabled, telegram enabled, twitter disabled
-- **Image**: `wcatz/goduckbot:1.2.0` (pullPolicy: IfNotPresent)
+- **Image**: `wcatz/goduckbot:2.5.0` (pullPolicy: Always)
+- **Chart**: 0.7.15
+- **Duck media**: gif
+- **Test instance**: `goduckbot-test` on `k3s-mr-slave` (latest image)
 
 ### Full Sync Performance (clean run)
 
