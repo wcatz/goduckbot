@@ -732,8 +732,11 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			timeDiffString, i.epochBlocks, i.totalBlocks,
 			blockEvent.Context.BlockNumber, blockEvent.Payload.BlockHash)
 
-		// Get duck image URL for both Telegram and Twitter
-		duckImageURL := getDuckImage()
+		// Get duck image URL for Telegram photo fallback
+		duckImageURL, duckErr := getDuckImage()
+		if duckErr != nil {
+			log.Printf("failed to fetch duck image: %v", duckErr)
+		}
 
 		// Send Telegram notification if enabled
 		if i.telegramEnabled && i.bot != nil {
@@ -766,10 +769,16 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 
 				// Fallback to photo (either GIF disabled or GIF send failed)
 				if !sentSuccessfully {
-					photo := &telebot.Photo{File: telebot.FromURL(duckImageURL), Caption: msg}
-					_, err = i.bot.Send(chat, photo)
-					if err != nil {
-						log.Printf("failed to send Telegram message: %s", err)
+					if duckImageURL != "" {
+						photo := &telebot.Photo{File: telebot.FromURL(duckImageURL), Caption: msg}
+						_, err = i.bot.Send(chat, photo)
+						if err != nil {
+							log.Printf("failed to send Telegram photo, sending text only: %s", err)
+							i.bot.Send(chat, msg)
+						}
+					} else {
+						// No duck image available, send text only
+						i.bot.Send(chat, msg)
 					}
 				}
 			}
@@ -856,17 +865,26 @@ func handleMessages() {
 	}
 }
 
-// Get random duck
-func getDuckImage() string {
-	resp, err := http.Get("https://random-d.uk/api/v2/random")
+// Get random duck image URL with timeout and safe error handling
+func getDuckImage() (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://random-d.uk/api/v2/random")
 	if err != nil {
-		log.Fatal(err)
+		return "", fmt.Errorf("failed to fetch duck image: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("duck API returned status %d", resp.StatusCode)
+	}
 	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
-	imageURL := result["url"].(string)
-	return imageURL
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode duck response: %w", err)
+	}
+	imageURL, ok := result["url"].(string)
+	if !ok || imageURL == "" {
+		return "", fmt.Errorf("no URL in duck API response")
+	}
+	return imageURL, nil
 }
 
 // fetchRandomDuckGIF fetches a random duck GIF from random-d.uk API with a timeout.
@@ -901,7 +919,8 @@ func fetchRandomDuckGIF() (string, error) {
 
 // Download image from URL to bytes
 func downloadImage(imageURL string) ([]byte, error) {
-	resp, err := http.Get(imageURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(imageURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download image: %w", err)
 	}
@@ -926,7 +945,8 @@ func (i *Indexer) uploadMediaToTwitter(mediaBytes []byte, mediaType upload_types
 		return "", fmt.Errorf("twitter client not initialized")
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	// Step 1: Initialize upload
 	initInput := &upload_types.InitializeInput{
@@ -1011,7 +1031,9 @@ func (i *Indexer) sendTweet(text string, gifURL string) error {
 	}
 
 	// Post the tweet (with or without media)
-	_, err := managetweet.Create(context.Background(), i.twitterClient, input)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := managetweet.Create(ctx, i.twitterClient, input)
 	if err != nil {
 		return fmt.Errorf("failed to post tweet: %w", err)
 	}
@@ -1106,6 +1128,15 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		i.leaderlogMu.Unlock()
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("leaderlog goroutine panic for epoch %d: %v", nextEpoch, r)
+					i.leaderlogMu.Lock()
+					delete(i.leaderlogCalcing, nextEpoch)
+					i.leaderlogFailed[nextEpoch] = time.Now()
+					i.leaderlogMu.Unlock()
+				}
+			}()
 			success := i.calculateAndPostLeaderlog(nextEpoch)
 			i.leaderlogMu.Lock()
 			delete(i.leaderlogCalcing, nextEpoch)
