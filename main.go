@@ -1057,7 +1057,8 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 			i.leaderlogMu.Unlock()
 			return
 		}
-		if i.store.IsSchedulePosted(context.Background(), nextEpoch) {
+		// Skip if schedule already exists in DB (computed or posted)
+		if existing, err := i.store.GetLeaderSchedule(context.Background(), nextEpoch); err == nil && existing != nil {
 			i.leaderlogMu.Unlock()
 			return
 		}
@@ -1102,22 +1103,30 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) {
 		}
 	}
 	if poolStake == 0 && i.koios != nil {
-		// Koios fallback: use current epoch's active stake as approximation
-		currentEpoch := epoch - 1
-		epochNo := koios.EpochNo(currentEpoch)
-		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-		if histErr != nil || len(poolHist.Data) == 0 {
-			log.Printf("Failed to get stake from NtC and Koios for epoch %d", epoch)
-			return
+		// Koios fallback: try current epoch first, then previous epoch
+		// (Koios may not have pool_history for an in-progress epoch)
+		for _, tryEpoch := range []int{epoch - 1, epoch - 2} {
+			epochNo := koios.EpochNo(tryEpoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr != nil {
+				log.Printf("Koios GetPoolHistory(%d) error: %v", tryEpoch, histErr)
+				continue
+			}
+			if len(poolHist.Data) == 0 {
+				log.Printf("Koios GetPoolHistory(%d) returned empty data", tryEpoch)
+				continue
+			}
+			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr != nil || len(epochInfo.Data) == 0 {
+				log.Printf("Koios GetEpochInfo(%d) failed: %v", tryEpoch, infoErr)
+				poolStake = 0
+				continue
+			}
+			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			log.Printf("Using Koios stake fallback for epoch %d leaderlog (from epoch %d)", epoch, tryEpoch)
+			break
 		}
-		poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-		if infoErr != nil || len(epochInfo.Data) == 0 {
-			log.Printf("Failed to get epoch info from Koios for epoch %d", epoch)
-			return
-		}
-		totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-		log.Printf("Using Koios stake fallback for epoch %d leaderlog (approx from epoch %d set snapshot)", epoch, currentEpoch)
 	}
 	if poolStake == 0 || totalStake == 0 {
 		log.Printf("No stake data available for epoch %d (pool=%d, total=%d)", epoch, poolStake, totalStake)
