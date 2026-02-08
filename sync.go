@@ -308,13 +308,9 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 	// Update watchdog timestamp
 	s.lastBlockTime.Store(now.Unix())
 
-	// Deliver to nonce tracking callback (historical sync only — after caught up,
-	// handleLiveBlock handles nonce tracking to avoid double processing)
-	if !s.caughtUp.Load() && s.onBlock != nil {
-		s.onBlock(slot, epoch, blockHash, vrfOutput)
-	}
-
-	// Check if caught up (within 120 slots / ~2 minutes of tip)
+	// Check if caught up (within 120 slots / ~2 minutes of tip).
+	// Must happen BEFORE callback dispatch so the transition block
+	// goes to exactly one path (onLiveBlock), not both.
 	if !s.caughtUp.Load() && tip.Point.Slot > 0 && slot+120 >= tip.Point.Slot {
 		s.caughtUp.Store(true)
 		if !s.syncStart.IsZero() {
@@ -329,18 +325,23 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 		}
 	}
 
-	// After caught up: deliver live block info for notifications
-	if s.caughtUp.Load() && s.onLiveBlock != nil {
-		s.onLiveBlock(LiveBlockInfo{
-			Slot:           slot,
-			Epoch:          epoch,
-			BlockHash:      blockHash,
-			BlockNumber:    header.BlockNumber(),
-			IssuerVkeyHash: header.IssuerVkey().Hash().String(),
-			BlockBodySize:  header.BlockBodySize(),
-			VrfOutput:      vrfOutput,
-		})
+	// Dispatch to exactly one callback: onLiveBlock after caught up, onBlock during historical sync.
+	if s.caughtUp.Load() {
+		if s.onLiveBlock != nil {
+			s.onLiveBlock(LiveBlockInfo{
+				Slot:           slot,
+				Epoch:          epoch,
+				BlockHash:      blockHash,
+				BlockNumber:    header.BlockNumber(),
+				IssuerVkeyHash: header.IssuerVkey().Hash().String(),
+				BlockBodySize:  header.BlockBodySize(),
+				VrfOutput:      vrfOutput,
+			})
+		}
 		return nil
+	}
+	if s.onBlock != nil {
+		s.onBlock(slot, epoch, blockHash, vrfOutput)
 	}
 
 	// Historical sync: log progress every 5,000 blocks
