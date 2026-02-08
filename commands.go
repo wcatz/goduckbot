@@ -517,9 +517,9 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	var poolStake, totalStake uint64
 	source := "NtC"
 
-	// Try NtC first with 60s timeout
+	// Try NtC first with 5s timeout
 	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
+		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Second)
 		snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 		ntcCancel()
 		if err != nil {
@@ -532,7 +532,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 
 	// Koios fallback
 	if poolStake == 0 && i.koios != nil {
-		source = "Koios"
+		source = "Koios (NtC socat stalled)"
 		currentEpoch := getCurrentEpoch()
 		for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
 			epochNo := koios.EpochNo(tryEpoch)
