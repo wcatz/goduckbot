@@ -564,9 +564,10 @@ func (i *Indexer) handleLiveBlock(info LiveBlockInfo) {
 		i.epochBlocks = 0
 	}
 
-	// Track VRF data for nonce evolution
+	// Track VRF data for nonce evolution (use slot-derived epoch from sync.go,
+	// not wall-clock i.epoch, to stay consistent with the historical-sync path)
 	if i.leaderlogEnabled && info.VrfOutput != nil {
-		i.nonceTracker.ProcessBlock(info.Slot, i.epoch, info.BlockHash, info.VrfOutput)
+		i.nonceTracker.ProcessBlock(info.Slot, info.Epoch, info.BlockHash, info.VrfOutput)
 		i.checkLeaderlogTrigger(info.Slot)
 	}
 
