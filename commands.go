@@ -25,7 +25,6 @@ var (
 
 	// Menu buttons
 	btnMenuEpoch     = telebot.InlineButton{Unique: "menu_epoch", Text: "\U0001F4C5 Epoch"}
-	btnMenuTip       = telebot.InlineButton{Unique: "menu_tip", Text: "\U0001F517 Tip"}
 	btnMenuBlocks    = telebot.InlineButton{Unique: "menu_blocks", Text: "\U0001F4E6 Blocks"}
 	btnMenuLeaderlog = telebot.InlineButton{Unique: "menu_ll", Text: "\U0001F4CB Leader"}
 	btnMenuNonce     = telebot.InlineButton{Unique: "menu_nonce", Text: "\U0001F511 Nonce"}
@@ -33,6 +32,7 @@ var (
 	btnMenuPing      = telebot.InlineButton{Unique: "menu_ping", Text: "\U0001F3D3 Ping"}
 	btnMenuNextBlock = telebot.InlineButton{Unique: "menu_next", Text: "\u23F3 Next Block"}
 	btnMenuDuck      = telebot.InlineButton{Unique: "menu_duck", Text: "\U0001F986 Duck"}
+	btnMenuVersion   = telebot.InlineButton{Unique: "menu_version", Text: "\u2139\uFE0F Version"}
 )
 
 // registerCommands registers all Telegram bot command handlers and sets the command menu.
@@ -103,11 +103,11 @@ func (i *Indexer) registerCommands() {
 		m.Sender = c.Sender
 		i.cmdEpoch(m)
 	})
-	i.bot.Handle(&btnMenuTip, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F517 Loading tip..."})
+	i.bot.Handle(&btnMenuVersion, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\u2139\uFE0F Loading version..."})
 		m := c.Message
 		m.Sender = c.Sender
-		i.cmdTip(m)
+		i.cmdVersion(m)
 	})
 	i.bot.Handle(&btnMenuBlocks, func(c *telebot.Callback) {
 		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F4E6 Loading blocks..."})
@@ -255,7 +255,7 @@ func (i *Indexer) cmdMenu(m *telebot.Message) {
 		InlineKeyboard: [][]telebot.InlineButton{
 			{btnMenuDuck, btnMenuNextBlock, btnMenuEpoch},
 			{btnMenuBlocks, btnMenuLeaderlog, btnMenuNonce},
-			{btnMenuStake, btnMenuTip, btnMenuPing},
+			{btnMenuStake, btnMenuPing, btnMenuVersion},
 		},
 	}
 	i.bot.Send(m.Chat, "\U0001F986 duckBot Menu", markup)
@@ -346,7 +346,7 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 	defer cancel()
 
 	var slotsIntoEpoch uint64
-	tipSlot, _, _, tipErr := i.nodeQuery.QueryTip(ctx)
+	tipSlot, blockHash, _, tipErr := i.nodeQuery.QueryTip(ctx)
 	if tipErr == nil && tipSlot >= epochStart {
 		slotsIntoEpoch = tipSlot - epochStart
 	}
@@ -361,11 +361,18 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 	hours := int(timeRemaining.Hours()) % 24
 	minutes := int(timeRemaining.Minutes()) % 60
 
-	msg := fmt.Sprintf("\U0001F4C5 Epoch %d\n\n"+
-		"Progress: %.1f%%\n"+
+	msg := fmt.Sprintf("\U0001F4C5 Epoch %d\n\n", epoch)
+	if tipErr == nil {
+		hashDisplay := blockHash
+		if len(hashDisplay) > 16 {
+			hashDisplay = blockHash[:16] + "..."
+		}
+		msg += fmt.Sprintf("Tip: slot %d\nBlock: %s\n\n", tipSlot, hashDisplay)
+	}
+	msg += fmt.Sprintf("Progress: %.1f%%\n"+
 		"Slots: %d / %d\n"+
 		"Remaining: %dd %dh %dm\n",
-		epoch, progress, slotsIntoEpoch, epochLen, days, hours, minutes)
+		progress, slotsIntoEpoch, epochLen, days, hours, minutes)
 
 	if progress >= 60 {
 		msg += "\n\u2705 Past stability window (60%)"
