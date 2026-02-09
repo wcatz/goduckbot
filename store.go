@@ -27,6 +27,14 @@ type BlockNonceRows interface {
 	Err() error
 }
 
+// BlockVrfRows is an iterator over blocks returning raw VRF output for integrity checking.
+type BlockVrfRows interface {
+	Next() bool
+	Scan() (epoch int, slot uint64, vrfOutput []byte, nonceValue []byte, blockHash string, err error)
+	Close()
+	Err() error
+}
+
 // Store is the database abstraction layer for goduckbot.
 // Both SQLite and PostgreSQL backends implement this interface.
 type Store interface {
@@ -46,6 +54,7 @@ type Store interface {
 	GetForgedSlots(ctx context.Context, epoch int) ([]uint64, error)
 	GetLastSyncedSlot(ctx context.Context) (uint64, error)
 	StreamBlockNonces(ctx context.Context) (BlockNonceRows, error)
+	StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error)
 	Close() error
 }
 
@@ -446,5 +455,56 @@ func (r *sqliteBlockNonceRows) Close() {
 }
 
 func (r *sqliteBlockNonceRows) Err() error {
+	return r.err
+}
+
+func (s *SqliteStore) StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT epoch, slot, vrf_output, nonce_value, block_hash FROM blocks ORDER BY slot`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &sqliteBlockVrfRows{rows: rows}, nil
+}
+
+type sqliteBlockVrfRows struct {
+	rows       *sql.Rows
+	epoch      int
+	slot       uint64
+	vrfOutput  []byte
+	nonceValue []byte
+	blockHash  string
+	err        error
+	closed     bool
+}
+
+func (r *sqliteBlockVrfRows) Next() bool {
+	if r.closed {
+		return false
+	}
+	if !r.rows.Next() {
+		r.err = r.rows.Err()
+		r.closed = true
+		return false
+	}
+	var slotInt64 int64
+	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.vrfOutput, &r.nonceValue, &r.blockHash)
+	r.slot = uint64(slotInt64)
+	return r.err == nil
+}
+
+func (r *sqliteBlockVrfRows) Scan() (epoch int, slot uint64, vrfOutput []byte, nonceValue []byte, blockHash string, err error) {
+	return r.epoch, r.slot, r.vrfOutput, r.nonceValue, r.blockHash, r.err
+}
+
+func (r *sqliteBlockVrfRows) Close() {
+	if !r.closed {
+		r.rows.Close()
+		r.closed = true
+	}
+}
+
+func (r *sqliteBlockVrfRows) Err() error {
 	return r.err
 }

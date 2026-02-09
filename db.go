@@ -381,3 +381,54 @@ func (r *pgBlockNonceRows) Close() {
 func (r *pgBlockNonceRows) Err() error {
 	return r.err
 }
+
+func (s *PgStore) StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT epoch, slot, vrf_output, nonce_value, block_hash FROM blocks ORDER BY slot`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &pgBlockVrfRows{rows: rows}, nil
+}
+
+type pgBlockVrfRows struct {
+	rows       pgx.Rows
+	epoch      int
+	slot       uint64
+	vrfOutput  []byte
+	nonceValue []byte
+	blockHash  string
+	err        error
+	closed     bool
+}
+
+func (r *pgBlockVrfRows) Next() bool {
+	if r.closed {
+		return false
+	}
+	if !r.rows.Next() {
+		r.err = r.rows.Err()
+		r.closed = true
+		return false
+	}
+	var slotInt64 int64
+	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.vrfOutput, &r.nonceValue, &r.blockHash)
+	r.slot = uint64(slotInt64)
+	return r.err == nil
+}
+
+func (r *pgBlockVrfRows) Scan() (epoch int, slot uint64, vrfOutput []byte, nonceValue []byte, blockHash string, err error) {
+	return r.epoch, r.slot, r.vrfOutput, r.nonceValue, r.blockHash, r.err
+}
+
+func (r *pgBlockVrfRows) Close() {
+	if !r.closed {
+		r.rows.Close()
+		r.closed = true
+	}
+}
+
+func (r *pgBlockVrfRows) Err() error {
+	return r.err
+}
