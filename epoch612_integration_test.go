@@ -34,9 +34,9 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	ctx := context.Background()
 
 	// === Step 1: Compute epoch 612 nonce from chain data ===
-	// Stream ALL blocks from Shelley genesis, evolving nonce via XOR (Nonce semigroup).
+	// Stream ALL blocks from Shelley genesis, evolving nonce via BLAKE2b-256 concat.
 	// At each epoch's 60% stability window: freeze candidate nonce.
-	// At each epoch boundary: TICKN rule — η(new) = η_c XOR η_ph
+	// At each epoch boundary: TICKN rule — η(new) = BLAKE2b-256(η_c || η_ph)
 
 	overallStart := time.Now()
 	nonceStart := time.Now()
@@ -72,13 +72,13 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 			t.Fatalf("Scan failed: %v", err)
 		}
 
-		// Epoch transition — TICKN rule: η(new) = η_c ⊕ η_ph
+		// Epoch transition — TICKN rule: η(new) = BLAKE2b-256(η_c || η_ph)
 		if epoch != currentEpoch {
 			if !candidateFrozen {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
 			}
-			eta0 = xorBytes(etaC, prevHashNonce)
+			eta0 = hashConcat(etaC, prevHashNonce)
 			if lastBlockHash != "" {
 				prevHashNonce, _ = hex.DecodeString(lastBlockHash)
 			}
@@ -87,7 +87,7 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 			candidateFrozen = false
 		}
 
-		// Evolve eta_v via XOR
+		// Evolve eta_v via BLAKE2b-256 concat
 		etaV = evolveNonce(etaV, nonceValue)
 		lastBlockHash = blockHash
 		blockCount++
@@ -115,7 +115,7 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	if lastBlockHash != "" {
 		prevHashNonce, _ = hex.DecodeString(lastBlockHash)
 	}
-	epoch612Nonce := xorBytes(etaC, prevHashNonce)
+	epoch612Nonce := hashConcat(etaC, prevHashNonce)
 
 	nonceElapsed := time.Since(nonceStart)
 	log.Printf("Nonce computation: %d blocks processed in %v", blockCount, nonceElapsed)
