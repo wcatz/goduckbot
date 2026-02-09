@@ -22,11 +22,23 @@ var (
 	btnNonceCurrent     = telebot.InlineButton{Unique: "nonce_current", Text: "\U0001F512 Current"}
 	btnDuckGif          = telebot.InlineButton{Unique: "duck_gif", Text: "\U0001F3AC GIF"}
 	btnDuckImg          = telebot.InlineButton{Unique: "duck_img", Text: "\U0001F4F7 Image"}
+
+	// Menu buttons
+	btnMenuEpoch     = telebot.InlineButton{Unique: "menu_epoch", Text: "\U0001F4C5 Epoch"}
+	btnMenuTip       = telebot.InlineButton{Unique: "menu_tip", Text: "\U0001F517 Tip"}
+	btnMenuBlocks    = telebot.InlineButton{Unique: "menu_blocks", Text: "\U0001F4E6 Blocks"}
+	btnMenuLeaderlog = telebot.InlineButton{Unique: "menu_ll", Text: "\U0001F4CB Leader"}
+	btnMenuNonce     = telebot.InlineButton{Unique: "menu_nonce", Text: "\U0001F511 Nonce"}
+	btnMenuStake     = telebot.InlineButton{Unique: "menu_stake", Text: "\U0001F4B0 Stake"}
+	btnMenuPing      = telebot.InlineButton{Unique: "menu_ping", Text: "\U0001F3D3 Ping"}
+	btnMenuDuck      = telebot.InlineButton{Unique: "menu_duck", Text: "\U0001F986 Duck"}
+	btnMenuVersion   = telebot.InlineButton{Unique: "menu_version", Text: "\u2139\uFE0F Version"}
 )
 
 // registerCommands registers all Telegram bot command handlers and sets the command menu.
 func (i *Indexer) registerCommands() {
 	i.bot.Handle("/help", i.cmdHelp)
+	i.bot.Handle("/menu", i.cmdMenu)
 	i.bot.Handle("/status", i.cmdStatus)
 	i.bot.Handle("/tip", i.cmdTip)
 	i.bot.Handle("/epoch", i.cmdEpoch)
@@ -84,8 +96,65 @@ func (i *Indexer) registerCommands() {
 		i.cmdDuck(m)
 	})
 
+	// Menu inline keyboard callbacks
+	i.bot.Handle(&btnMenuEpoch, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdEpoch(m)
+	})
+	i.bot.Handle(&btnMenuTip, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdTip(m)
+	})
+	i.bot.Handle(&btnMenuBlocks, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdBlocks(m)
+	})
+	i.bot.Handle(&btnMenuLeaderlog, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdLeaderlog(m)
+	})
+	i.bot.Handle(&btnMenuNonce, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdNonce(m)
+	})
+	i.bot.Handle(&btnMenuStake, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdStake(m)
+	})
+	i.bot.Handle(&btnMenuPing, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdPing(m)
+	})
+	i.bot.Handle(&btnMenuDuck, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdDuck(m)
+	})
+	i.bot.Handle(&btnMenuVersion, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{})
+		m := c.Message
+		m.Sender = c.Sender
+		i.cmdVersion(m)
+	})
+
 	// Register command menu with Telegram so users see / autocomplete
 	commands := []telebot.Command{
+		{Text: "menu", Description: "Interactive command menu"},
 		{Text: "help", Description: "Show available commands"},
 		{Text: "status", Description: "DB sync status"},
 		{Text: "tip", Description: "Current chain tip"},
@@ -170,6 +239,20 @@ func (i *Indexer) cmdHelp(m *telebot.Message) {
 		"`/duck` \\[gif|img] \u2014 Random duck pic\n" +
 		"`/version` \u2014 Bot version info"
 	i.bot.Send(m.Chat, msg, telebot.ModeMarkdown)
+}
+
+func (i *Indexer) cmdMenu(m *telebot.Message) {
+	if !i.isGroupAllowed(m) {
+		return
+	}
+	markup := &telebot.ReplyMarkup{
+		InlineKeyboard: [][]telebot.InlineButton{
+			{btnMenuEpoch, btnMenuTip, btnMenuBlocks},
+			{btnMenuLeaderlog, btnMenuNonce, btnMenuStake},
+			{btnMenuPing, btnMenuDuck, btnMenuVersion},
+		},
+	}
+	i.bot.Send(m.Chat, "\U0001F986 duckBot Menu", markup)
 }
 
 func (i *Indexer) cmdStatus(m *telebot.Message) {
