@@ -406,13 +406,33 @@ func (i *Indexer) Start() error {
 		i.scheduleExists = make(map[int]bool)
 		log.Println("Nonce tracker initialized")
 
-		// Backfill nonce history in background
+		// Full mode startup tasks (sequential: backfill → integrity check → schedule backfill)
 		if fullMode {
 			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 				defer cancel()
+
+				// Step 1: Backfill nonce history
 				if err := i.nonceTracker.BackfillNonces(ctx); err != nil {
 					log.Printf("Nonce backfill failed: %v", err)
+					return
+				}
+
+				// Step 2: Nonce integrity check (optional)
+				if viper.GetBool("leaderlog.nonceIntegrityCheck") {
+					report, err := i.nonceTracker.NonceIntegrityCheck(ctx)
+					if err != nil {
+						log.Printf("Nonce integrity check failed: %v", err)
+					} else if report.KoiosMismatched > 0 {
+						log.Printf("WARNING: %d epoch nonce mismatches detected!", report.KoiosMismatched)
+					}
+				}
+
+				// Step 3: Schedule history backfill (optional)
+				if viper.GetBool("leaderlog.backfillSchedules") {
+					if err := i.backfillSchedules(ctx); err != nil {
+						log.Printf("Schedule backfill failed: %v", err)
+					}
 				}
 			}()
 		}
@@ -1302,6 +1322,115 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 
 	log.Printf("Leader schedule for epoch %d posted", epoch)
 	return true
+}
+
+// backfillSchedules calculates leader schedules for all historical epochs
+// that have a computed nonce but no schedule yet. Uses Koios for historical
+// stake data. This is a long-running one-shot operation.
+func (i *Indexer) backfillSchedules(ctx context.Context) error {
+	start := time.Now()
+	log.Println("╔══════════════════════════════════════════════════════════════╗")
+	log.Println("║              SCHEDULE HISTORY BACKFILL                       ║")
+	log.Println("╚══════════════════════════════════════════════════════════════╝")
+
+	epochLength := GetEpochLength(i.networkMagic)
+	slotToTimeFn := makeSlotToTime(i.networkMagic)
+
+	shelleyStart := ShelleyStartEpoch
+	if i.networkMagic == PreprodNetworkMagic {
+		shelleyStart = PreprodShelleyStartEpoch
+	}
+
+	// Find the range of epochs with nonces
+	computed := 0
+	skipped := 0
+	failed := 0
+
+	for epoch := shelleyStart + 1; epoch <= i.epoch; epoch++ {
+		// Check if schedule already exists
+		existing, _ := i.store.GetLeaderSchedule(ctx, epoch)
+		if existing != nil {
+			skipped++
+			continue
+		}
+
+		// Get nonce from DB
+		nonce, err := i.store.GetFinalNonce(ctx, epoch)
+		if err != nil || nonce == nil {
+			continue // no nonce available for this epoch
+		}
+
+		// Get historical stake from Koios pool_history
+		var poolStake, totalStake uint64
+		epochNo := koios.EpochNo(epoch)
+		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+		if histErr != nil || len(poolHist.Data) == 0 {
+			// Try adjacent epochs
+			for _, tryEpoch := range []int{epoch - 1, epoch + 1} {
+				tryNo := koios.EpochNo(tryEpoch)
+				ph, e := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &tryNo, nil)
+				if e == nil && len(ph.Data) > 0 {
+					poolStake = uint64(ph.Data[0].ActiveStake.IntPart())
+					break
+				}
+			}
+		} else {
+			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+		}
+
+		if poolStake == 0 {
+			failed++
+			continue
+		}
+
+		// Get total active stake from epoch_info
+		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+		if infoErr != nil || len(epochInfo.Data) == 0 {
+			failed++
+			continue
+		}
+		totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+		if totalStake == 0 {
+			failed++
+			continue
+		}
+
+		// Calculate schedule
+		epochStartSlot := GetEpochStartSlot(epoch, i.networkMagic)
+		schedule, calcErr := CalculateLeaderSchedule(
+			epoch, nonce, i.vrfKey,
+			poolStake, totalStake,
+			epochLength, epochStartSlot, slotToTimeFn,
+		)
+		if calcErr != nil {
+			log.Printf("Schedule backfill: epoch %d calc failed: %v", epoch, calcErr)
+			failed++
+			continue
+		}
+
+		// Compute performance: actual blocks forged / assigned slots
+		forgedSlots, _ := i.store.GetForgedSlots(ctx, epoch)
+		if len(schedule.AssignedSlots) > 0 {
+			schedule.Performance = float64(len(forgedSlots)) / float64(len(schedule.AssignedSlots)) * 100
+		}
+
+		if err := i.store.InsertLeaderSchedule(ctx, schedule); err != nil {
+			log.Printf("Schedule backfill: epoch %d store failed: %v", epoch, err)
+			failed++
+			continue
+		}
+
+		computed++
+		log.Printf("Schedule backfill: epoch %d — %d assigned, %d forged (%.0f%% perf)",
+			epoch, len(schedule.AssignedSlots), len(forgedSlots), schedule.Performance)
+
+		// Rate limit Koios calls
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	log.Printf("Schedule backfill complete in %v: %d computed, %d skipped, %d failed",
+		time.Since(start).Round(time.Second), computed, skipped, failed)
+	return nil
 }
 
 // makeSlotToTime returns a function that converts a slot number to a time.Time.

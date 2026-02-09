@@ -60,6 +60,7 @@ type LeaderSchedule struct {
 	TotalStake    uint64       `json:"totalStake"`
 	Sigma         float64      `json:"sigma"`
 	IdealSlots    float64      `json:"idealSlots"`
+	Performance   float64      `json:"performance"`
 	AssignedSlots []LeaderSlot `json:"assignedSlots"`
 	CalculatedAt  time.Time    `json:"calculatedAt"`
 }
