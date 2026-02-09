@@ -140,10 +140,13 @@ func (i *Indexer) registerCommands() {
 		i.cmdPing(m)
 	})
 	i.bot.Handle(&btnMenuDuck, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F986 Fetching duck..."})
-		m := c.Message
-		m.Sender = c.Sender
-		i.cmdDuck(m)
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F986 Pick a duck type!"})
+		markup := &telebot.ReplyMarkup{
+			InlineKeyboard: [][]telebot.InlineButton{
+				{btnDuckGif, btnDuckImg},
+			},
+		}
+		i.bot.Send(c.Message.Chat, "\U0001F986 Choose duck type:", markup)
 	})
 	i.bot.Handle(&btnMenuVersion, func(c *telebot.Callback) {
 		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\u2139\uFE0F Loading version..."})
