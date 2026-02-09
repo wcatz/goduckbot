@@ -31,8 +31,8 @@ var (
 	btnMenuNonce     = telebot.InlineButton{Unique: "menu_nonce", Text: "\U0001F511 Nonce"}
 	btnMenuStake     = telebot.InlineButton{Unique: "menu_stake", Text: "\U0001F4B0 Stake"}
 	btnMenuPing      = telebot.InlineButton{Unique: "menu_ping", Text: "\U0001F3D3 Ping"}
+	btnMenuNextBlock = telebot.InlineButton{Unique: "menu_next", Text: "\u23F3 Next Block"}
 	btnMenuDuck      = telebot.InlineButton{Unique: "menu_duck", Text: "\U0001F986 Duck"}
-	btnMenuVersion   = telebot.InlineButton{Unique: "menu_version", Text: "\u2139\uFE0F Version"}
 )
 
 // registerCommands registers all Telegram bot command handlers and sets the command menu.
@@ -148,11 +148,11 @@ func (i *Indexer) registerCommands() {
 		}
 		i.bot.Send(c.Message.Chat, "\U0001F986 Choose duck type:", markup)
 	})
-	i.bot.Handle(&btnMenuVersion, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\u2139\uFE0F Loading version..."})
+	i.bot.Handle(&btnMenuNextBlock, func(c *telebot.Callback) {
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\u23F3 Loading next block..."})
 		m := c.Message
 		m.Sender = c.Sender
-		i.cmdVersion(m)
+		i.cmdNextBlock(m)
 	})
 
 	// Register command menu with Telegram so users see / autocomplete
@@ -253,9 +253,9 @@ func (i *Indexer) cmdMenu(m *telebot.Message) {
 	}
 	markup := &telebot.ReplyMarkup{
 		InlineKeyboard: [][]telebot.InlineButton{
-			{btnMenuEpoch, btnMenuTip, btnMenuBlocks},
-			{btnMenuLeaderlog, btnMenuNonce, btnMenuStake},
-			{btnMenuPing, btnMenuDuck, btnMenuVersion},
+			{btnMenuDuck, btnMenuNextBlock, btnMenuEpoch},
+			{btnMenuBlocks, btnMenuLeaderlog, btnMenuNonce},
+			{btnMenuStake, btnMenuTip, btnMenuPing},
 		},
 	}
 	i.bot.Send(m.Chat, "\U0001F986 duckBot Menu", markup)
@@ -767,13 +767,49 @@ func (i *Indexer) cmdBlocks(m *telebot.Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Get forged slots for this epoch
+	forgedSlots, _ := i.store.GetForgedSlots(ctx, epoch)
+	forgedSet := make(map[uint64]bool, len(forgedSlots))
+	for _, s := range forgedSlots {
+		forgedSet[s] = true
+	}
+
 	// Try stored leader schedule for assigned slot count
 	schedule, err := i.store.GetLeaderSchedule(ctx, epoch)
 	if err == nil && schedule != nil {
+		forgedCount := 0
+		for _, slot := range schedule.AssignedSlots {
+			if forgedSet[slot.Slot] {
+				forgedCount++
+			}
+		}
+
 		msg := fmt.Sprintf("\U0001F4E6 Blocks \u2014 Epoch %d\n\n"+
 			"Assigned: %d slots\n"+
-			"Expected: %.2f\n",
-			epoch, len(schedule.AssignedSlots), schedule.IdealSlots)
+			"Forged: %d / %d\n"+
+			"Expected: %.2f\n\n",
+			epoch, len(schedule.AssignedSlots), forgedCount, len(schedule.AssignedSlots), schedule.IdealSlots)
+
+		loc := time.UTC
+		if i.leaderlogTZ != "" {
+			if l, err := time.LoadLocation(i.leaderlogTZ); err == nil {
+				loc = l
+			}
+		}
+		timeFmt := "01/02 03:04 PM"
+		if i.leaderlogTimeFormat == "24h" {
+			timeFmt = "01/02 15:04"
+		}
+
+		for _, slot := range schedule.AssignedSlots {
+			check := "\u2B1C"
+			if forgedSet[slot.Slot] {
+				check = "\u2705"
+			}
+			localTime := slot.At.In(loc)
+			msg += fmt.Sprintf("%s %s  Slot %d\n", check, localTime.Format(timeFmt), slot.SlotInEpoch)
+		}
+
 		i.bot.Send(m.Chat, msg)
 		return
 	}

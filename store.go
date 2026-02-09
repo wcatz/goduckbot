@@ -43,6 +43,7 @@ type Store interface {
 	GetLeaderSchedule(ctx context.Context, epoch int) (*LeaderSchedule, error)
 	IsSchedulePosted(ctx context.Context, epoch int) bool
 	MarkSchedulePosted(ctx context.Context, epoch int) error
+	GetForgedSlots(ctx context.Context, epoch int) ([]uint64, error)
 	GetLastSyncedSlot(ctx context.Context) (uint64, error)
 	StreamBlockNonces(ctx context.Context) (BlockNonceRows, error)
 	Close() error
@@ -282,6 +283,24 @@ func (s *SqliteStore) GetBlockHash(ctx context.Context, slot uint64) (string, er
 		int64(slot),
 	).Scan(&hash)
 	return hash, err
+}
+
+func (s *SqliteStore) GetForgedSlots(ctx context.Context, epoch int) ([]uint64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT slot FROM blocks WHERE epoch = ? ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var slots []uint64
+	for rows.Next() {
+		var slot int64
+		if err := rows.Scan(&slot); err != nil {
+			return nil, err
+		}
+		slots = append(slots, uint64(slot))
+	}
+	return slots, rows.Err()
 }
 
 func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
