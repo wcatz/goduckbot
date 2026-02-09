@@ -51,6 +51,8 @@ config:
     timezone: ""
     # Time format: "12h" or "24h"
     timeFormat: "12h"
+    # NtC query timeout for stake snapshot queries (Go duration, e.g. "10m", "30m")
+    ntcQueryTimeout: "10m"
 
   database:
     driver: "sqlite"

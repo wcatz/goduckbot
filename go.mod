@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.11
 
 require (
-	github.com/blinklabs-io/adder v0.37.0
+	github.com/blinklabs-io/adder v0.37.1-0.20260209154719-460d03ed24c1
 	github.com/blinklabs-io/gouroboros v0.153.1
 	github.com/cardano-community/koios-go-client/v3 v3.1.3
 	github.com/cenkalti/backoff/v4 v4.3.0

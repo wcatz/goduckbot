@@ -91,18 +91,18 @@ Is leader     = leaderValue < threshold
 ```
 
 ### Nonce Evolution
-Per block: `nonceValue = BLAKE2b-256(0x4E || vrfOutput)`, then `eta_v = BLAKE2b-256(eta_v || nonceValue)`. Rolling eta_v accumulates across epoch boundaries (no reset). Candidate nonce freezes at 70% epoch progress (stability window). Koios used as fallback when local nonce unavailable.
+Per block: `nonceValue = BLAKE2b-256(0x4E || vrfOutput)`, then `eta_v = eta_v XOR nonceValue` (Cardano Nonce semigroup: `Nonce a <> Nonce b = Nonce (xor a b)`). Rolling eta_v accumulates across epoch boundaries (no reset). Candidate nonce (`η_c`) freezes at 60% epoch progress (stability window = 259,200 slots on mainnet). At each epoch boundary, the TICKN rule computes: `epochNonce = η_c XOR η_ph` where `η_ph` is the block hash from the last block of the prior epoch. Koios used as fallback in lite mode when local nonce unavailable.
 
 **Batch processing:** `ProcessBatch()` method in `nonce.go` performs in-memory nonce evolution for batches of blocks (used during historical sync), then persists the final nonce state in a single DB transaction. This dramatically improves sync performance vs per-block DB writes.
 
 ### Trigger Flow
-1. Every block: extract VRF output from header, update evolving nonce
-2. At 70% epoch progress: freeze candidate nonce
+1. Every block: extract VRF output from header, update evolving nonce via XOR
+2. At 60% epoch progress (stability window): freeze candidate nonce
 3. After freeze: calculate next epoch schedule (mutex-guarded, one goroutine per epoch)
 4. Post schedule to Telegram, store in database
 
 ### Race Condition Prevention
-`checkLeaderlogTrigger` fires on every block after 70% — uses `leaderlogMu` mutex + `leaderlogCalcing` map to ensure only one goroutine runs per epoch. Map entry is cleaned up after goroutine completes.
+`checkLeaderlogTrigger` fires on every block after 60% — uses `leaderlogMu` mutex + `leaderlogCalcing` map to ensure only one goroutine runs per epoch. Map entry is cleaned up after goroutine completes.
 
 ### VRF Extraction by Era
 
@@ -246,7 +246,7 @@ Test files:
 - `leaderlog_test.go` — SlotToEpoch (all networks), round-trip, formatNumber
 
 ## Key Dependencies
-- `blinklabs-io/adder` v0.37.0 — live chain tail (must match gouroboros version)
+- `blinklabs-io/adder` v0.37.1-pre (commit 460d03e, fixes auto-reconnect channel orphaning) — live chain tail
 - `blinklabs-io/gouroboros` v0.153.1 — VRF (ECVRF-ED25519-SHA512-Elligator2), NtN ChainSync, NtC LocalStateQuery, ledger types
 - `modernc.org/sqlite` — pure Go SQLite (no CGO required)
 - `jackc/pgx/v5` — PostgreSQL driver with COPY protocol support for bulk inserts

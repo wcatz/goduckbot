@@ -8,8 +8,6 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/blake2b"
 )
 
 func TestEpoch612LeaderSchedule(t *testing.T) {
@@ -36,9 +34,9 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	ctx := context.Background()
 
 	// === Step 1: Compute epoch 612 nonce from chain data ===
-	// Stream ALL blocks from Shelley genesis, evolving nonce exactly like the bot does.
+	// Stream ALL blocks from Shelley genesis, evolving nonce via XOR (Nonce semigroup).
 	// At each epoch's 60% stability window: freeze candidate nonce.
-	// At each epoch boundary: compute epoch_nonce(e+1) = hash(eta_c(e) || eta_0(e)).
+	// At each epoch boundary: TICKN rule — η(new) = η_c XOR η_ph
 
 	overallStart := time.Now()
 	nonceStart := time.Now()
@@ -48,7 +46,9 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	copy(etaV, genesisHash)
 	eta0 := make([]byte, 32) // epoch nonce — eta_0(208) = shelley genesis hash
 	copy(eta0, genesisHash)
-	etaC := make([]byte, 32) // candidate nonce (frozen at stability window)
+	etaC := make([]byte, 32)          // candidate nonce (frozen at stability window)
+	prevHashNonce := make([]byte, 32)  // η_ph — NeutralNonce at Shelley start
+	var lastBlockHash string
 
 	currentEpoch := ShelleyStartEpoch
 	candidateFrozen := false
@@ -57,7 +57,7 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 	log.Printf("Streaming blocks from Shelley genesis to compute epoch nonces...")
 
 	rows, err := store.pool.Query(ctx,
-		"SELECT epoch, slot, nonce_value FROM blocks WHERE epoch <= 611 ORDER BY slot ASC")
+		"SELECT epoch, slot, nonce_value, block_hash FROM blocks WHERE epoch <= 611 ORDER BY slot ASC")
 	if err != nil {
 		t.Fatalf("Failed to query blocks: %v", err)
 	}
@@ -67,29 +67,29 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 		var epoch int
 		var slot uint64
 		var nonceValue []byte
-		if err := rows.Scan(&epoch, &slot, &nonceValue); err != nil {
+		var blockHash string
+		if err := rows.Scan(&epoch, &slot, &nonceValue, &blockHash); err != nil {
 			t.Fatalf("Scan failed: %v", err)
 		}
 
-		// Epoch transition
+		// Epoch transition — TICKN rule: η(new) = η_c ⊕ η_ph
 		if epoch != currentEpoch {
-			// If we didn't freeze candidate yet (epoch had < 60% blocks), freeze now
 			if !candidateFrozen {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
 			}
-			// Compute epoch nonce for new epoch: eta_0(e+1) = hash(eta_c(e) || eta_0(e))
-			h, _ := blake2b.New256(nil)
-			h.Write(etaC)
-			h.Write(eta0)
-			eta0 = h.Sum(nil)
+			eta0 = xorBytes(etaC, prevHashNonce)
+			if lastBlockHash != "" {
+				prevHashNonce, _ = hex.DecodeString(lastBlockHash)
+			}
 
 			currentEpoch = epoch
 			candidateFrozen = false
 		}
 
-		// Evolve eta_v
+		// Evolve eta_v via XOR
 		etaV = evolveNonce(etaV, nonceValue)
+		lastBlockHash = blockHash
 		blockCount++
 
 		// Freeze candidate at 60% stability window
@@ -112,10 +112,10 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 		etaC = make([]byte, 32)
 		copy(etaC, etaV)
 	}
-	h, _ := blake2b.New256(nil)
-	h.Write(etaC)
-	h.Write(eta0)
-	epoch612Nonce := h.Sum(nil)
+	if lastBlockHash != "" {
+		prevHashNonce, _ = hex.DecodeString(lastBlockHash)
+	}
+	epoch612Nonce := xorBytes(etaC, prevHashNonce)
 
 	nonceElapsed := time.Since(nonceStart)
 	log.Printf("Nonce computation: %d blocks processed in %v", blockCount, nonceElapsed)

@@ -33,7 +33,7 @@ func TestVrfNonceValue(t *testing.T) {
 }
 
 func TestEvolveNonce(t *testing.T) {
-	// evolveNonce = BLAKE2b-256(currentNonce || nonceValue)
+	// evolveNonce = XOR (Cardano Nonce semigroup)
 	currentNonce := make([]byte, 32)
 	currentNonce[0] = 0xAA
 	nonceValue := make([]byte, 32)
@@ -41,15 +41,37 @@ func TestEvolveNonce(t *testing.T) {
 
 	result := evolveNonce(currentNonce, nonceValue)
 
-	// Verify manually
-	h, _ := blake2b.New256(nil)
-	h.Write(currentNonce)
-	h.Write(nonceValue)
-	expected := h.Sum(nil)
+	// XOR: 0xAA ^ 0xBB = 0x11, rest are 0x00 ^ 0x00 = 0x00
+	if result[0] != 0x11 {
+		t.Fatalf("evolveNonce byte[0] mismatch: got 0x%x, want 0x11", result[0])
+	}
+	for i := 1; i < 32; i++ {
+		if result[i] != 0 {
+			t.Fatalf("evolveNonce byte[%d] mismatch: got 0x%x, want 0x00", i, result[i])
+		}
+	}
+}
 
-	if hex.EncodeToString(result) != hex.EncodeToString(expected) {
-		t.Fatalf("evolveNonce mismatch:\n  got:  %s\n  want: %s",
-			hex.EncodeToString(result), hex.EncodeToString(expected))
+func TestXorBytes(t *testing.T) {
+	a := make([]byte, 32)
+	b := make([]byte, 32)
+	for i := range a {
+		a[i] = byte(i)
+		b[i] = byte(0xFF - i)
+	}
+	result := xorBytes(a, b)
+	for i := range result {
+		expected := byte(i) ^ byte(0xFF-i)
+		if result[i] != expected {
+			t.Fatalf("xorBytes byte[%d]: got 0x%x, want 0x%x", i, result[i], expected)
+		}
+	}
+
+	// XOR with zeros is identity
+	zeros := make([]byte, 32)
+	result = xorBytes(a, zeros)
+	if hex.EncodeToString(result) != hex.EncodeToString(a) {
+		t.Fatalf("xorBytes with zeros should be identity")
 	}
 }
 

@@ -10,7 +10,7 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 
 **Leader Schedule** — Pure Go CPRAOS implementation checking every slot per epoch against your VRF key. Calculates next epoch schedule automatically at the stability window (60% into epoch). On-demand via `/leaderlog`.
 
-**Epoch Nonces** — In full mode, streams every block from Shelley genesis extracting VRF outputs per era, evolving the nonce via BLAKE2b-256, and freezing at the stability window. Backfills ~400 epochs in under 2 minutes.
+**Epoch Nonces** — In full mode, streams every block from Shelley genesis extracting VRF outputs per era, evolving the nonce via XOR (Cardano Nonce semigroup), and freezing at the stability window. Backfills ~400 epochs in under 2 minutes.
 
 **Stake Queries** — Direct NtC local state query to your cardano-node for mark/set/go stake snapshots. Falls back to Koios if NtC is unavailable.
 
@@ -234,9 +234,9 @@ The epoch nonce is a 32-byte hash serving as randomness for VRF leader election.
 **In full mode**, duckBot self-computes nonces by streaming every block from Shelley genesis:
 
 1. Per block: extract VRF output from header, compute `nonceValue = BLAKE2b-256("N" || vrfOutput)`
-2. Evolve: `eta_v = BLAKE2b-256(eta_v || nonceValue)` — rolling accumulation across the epoch
-3. At stability window (60% epoch progress): freeze candidate nonce
-4. Final nonce: `BLAKE2b-256(candidateNonce || previousEpochNonce)`
+2. Evolve: `eta_v = eta_v XOR nonceValue` — Cardano Nonce semigroup (`Nonce a <> Nonce b = Nonce (xor a b)`)
+3. At stability window (60% epoch progress): freeze candidate nonce (`η_c`)
+4. Epoch transition (TICKN rule): `epochNonce = η_c XOR η_ph` where `η_ph` is the last block hash from the prior epoch boundary
 
 **In lite mode**, nonces are fetched from the Koios API.
 
@@ -367,7 +367,7 @@ The adder pipeline handles reconnection at the outer level — duckBot wraps it 
 | Library | Version | Purpose |
 | ------- | ------- | ------- |
 | `blinklabs-io/gouroboros` | v0.153.1 | VRF, NtN ChainSync, NtC LocalStateQuery, ledger types |
-| `blinklabs-io/adder` | v0.37.0 | Live chain tail pipeline (full block data incl. tx count) |
+| `blinklabs-io/adder` | v0.37.1-pre | Live chain tail pipeline (full block data incl. tx count) |
 | `cardano-community/koios-go-client/v3` | | Koios API for stake data and nonce fallback |
 | `gopkg.in/telebot.v4` | | Telegram bot framework |
 | `michimani/gotwi` | | Twitter/X API v2 client |

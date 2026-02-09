@@ -287,8 +287,9 @@ func (i *Indexer) Start() error {
 	}
 	if ntcHost != "" {
 		network, address := parseNodeAddress(ntcHost)
-		i.nodeQuery = NewNodeQueryClient(ntcHost, i.networkMagic)
-		log.Printf("Node query client initialized (NtC): %s://%s", network, address)
+		ntcQueryTimeout := viper.GetDuration("leaderlog.ntcQueryTimeout")
+		i.nodeQuery = NewNodeQueryClient(ntcHost, i.networkMagic, ntcQueryTimeout)
+		log.Printf("Node query client initialized (NtC): %s://%s (timeout: %v)", network, address, i.nodeQuery.queryTimeout)
 	}
 
 	// Twitter toggle
