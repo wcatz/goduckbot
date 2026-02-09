@@ -272,7 +272,7 @@ func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) erro
 
 func (s *PgStore) StreamBlockNonces(ctx context.Context) (BlockNonceRows, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT epoch, slot, nonce_value FROM blocks ORDER BY slot`,
+		`SELECT epoch, slot, nonce_value, block_hash FROM blocks ORDER BY slot`,
 	)
 	if err != nil {
 		return nil, err
@@ -343,12 +343,13 @@ func (s *PgStore) GetLeaderSchedule(ctx context.Context, epoch int) (*LeaderSche
 
 // pgBlockNonceRows wraps pgx.Rows to implement BlockNonceRows.
 type pgBlockNonceRows struct {
-	rows   pgx.Rows
-	epoch  int
-	slot   uint64
-	nonce  []byte
-	err    error
-	closed bool
+	rows      pgx.Rows
+	epoch     int
+	slot      uint64
+	nonce     []byte
+	blockHash string
+	err       error
+	closed    bool
 }
 
 func (r *pgBlockNonceRows) Next() bool {
@@ -361,13 +362,13 @@ func (r *pgBlockNonceRows) Next() bool {
 		return false
 	}
 	var slotInt64 int64
-	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce)
+	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce, &r.blockHash)
 	r.slot = uint64(slotInt64)
 	return r.err == nil
 }
 
-func (r *pgBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, err error) {
-	return r.epoch, r.slot, r.nonce, r.err
+func (r *pgBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, blockHash string, err error) {
+	return r.epoch, r.slot, r.nonce, r.blockHash, r.err
 }
 
 func (r *pgBlockNonceRows) Close() {

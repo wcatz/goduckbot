@@ -22,7 +22,7 @@ type BlockData struct {
 // BlockNonceRows is an iterator over blocks for nonce computation.
 type BlockNonceRows interface {
 	Next() bool
-	Scan() (epoch int, slot uint64, nonceValue []byte, err error)
+	Scan() (epoch int, slot uint64, nonceValue []byte, blockHash string, err error)
 	Close()
 	Err() error
 }
@@ -332,7 +332,7 @@ func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) 
 
 func (s *SqliteStore) StreamBlockNonces(ctx context.Context) (BlockNonceRows, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT epoch, slot, nonce_value FROM blocks ORDER BY slot`,
+		`SELECT epoch, slot, nonce_value, block_hash FROM blocks ORDER BY slot`,
 	)
 	if err != nil {
 		return nil, err
@@ -410,12 +410,13 @@ func (s *SqliteStore) GetLeaderSchedule(ctx context.Context, epoch int) (*Leader
 
 // sqliteBlockNonceRows wraps sql.Rows to implement BlockNonceRows.
 type sqliteBlockNonceRows struct {
-	rows   *sql.Rows
-	epoch  int
-	slot   uint64
-	nonce  []byte
-	err    error
-	closed bool
+	rows      *sql.Rows
+	epoch     int
+	slot      uint64
+	nonce     []byte
+	blockHash string
+	err       error
+	closed    bool
 }
 
 func (r *sqliteBlockNonceRows) Next() bool {
@@ -428,13 +429,13 @@ func (r *sqliteBlockNonceRows) Next() bool {
 		return false
 	}
 	var slotInt64 int64
-	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce)
+	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce, &r.blockHash)
 	r.slot = uint64(slotInt64)
 	return r.err == nil
 }
 
-func (r *sqliteBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, err error) {
-	return r.epoch, r.slot, r.nonce, r.err
+func (r *sqliteBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, blockHash string, err error) {
+	return r.epoch, r.slot, r.nonce, r.blockHash, r.err
 }
 
 func (r *sqliteBlockNonceRows) Close() {
