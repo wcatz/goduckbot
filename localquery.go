@@ -18,15 +18,20 @@ import (
 type NodeQueryClient struct {
 	nodeAddress  string
 	networkMagic uint32
+	queryTimeout time.Duration
 }
 
 // NewNodeQueryClient creates a new node query client.
 // nodeAddress can be a TCP address ("host:port"), a UNIX socket path ("/ipc/node.socket"),
 // or explicitly prefixed ("unix:///ipc/node.socket", "tcp://host:port").
-func NewNodeQueryClient(nodeAddress string, networkMagic int) *NodeQueryClient {
+func NewNodeQueryClient(nodeAddress string, networkMagic int, queryTimeout time.Duration) *NodeQueryClient {
+	if queryTimeout == 0 {
+		queryTimeout = 10 * time.Minute
+	}
 	return &NodeQueryClient{
 		nodeAddress:  nodeAddress,
 		networkMagic: uint32(networkMagic),
+		queryTimeout: queryTimeout,
 	}
 }
 
@@ -68,7 +73,7 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 			ouroboros.WithKeepAlive(false),
 			ouroboros.WithLocalStateQueryConfig(
 				localstatequery.NewConfig(
-					localstatequery.WithQueryTimeout(10*time.Minute),
+					localstatequery.WithQueryTimeout(c.queryTimeout),
 				),
 			),
 		)
