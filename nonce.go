@@ -69,28 +69,30 @@ func initialNonce(fullMode bool) []byte {
 }
 
 // vrfNonceValue computes the nonce contribution from a VRF output.
-// nonceValue = BLAKE2b-256(0x4E || vrfOutput)  — the "N" prefix
+// nonceValue = BLAKE2b-256(vrfOutput)
+// Verified against pallas/cncli test vectors (no domain prefix).
 func vrfNonceValue(vrfOutput []byte) []byte {
 	h, _ := blake2b.New256(nil)
-	h.Write([]byte{0x4E}) // "N" prefix
 	h.Write(vrfOutput)
 	return h.Sum(nil)
 }
 
-// xorBytes XORs two 32-byte slices. Implements the Cardano Nonce semigroup:
-// Nonce a <> Nonce b = Nonce (Hash.xor a b)
-func xorBytes(a, b []byte) []byte {
-	result := make([]byte, 32)
-	for i := 0; i < 32; i++ {
-		result[i] = a[i] ^ b[i]
-	}
-	return result
+// evolveNonce updates the evolving nonce with a new nonce contribution.
+// eta_v = BLAKE2b-256(eta_v || nonceValue)
+// Verified against pallas/cncli test vectors.
+func evolveNonce(currentNonce, nonceValue []byte) []byte {
+	h, _ := blake2b.New256(nil)
+	h.Write(currentNonce)
+	h.Write(nonceValue)
+	return h.Sum(nil)
 }
 
-// evolveNonce updates the evolving nonce with a new nonce contribution.
-// eta_v = eta_v XOR nonceValue  (Cardano Nonce semigroup)
-func evolveNonce(currentNonce, nonceValue []byte) []byte {
-	return xorBytes(currentNonce, nonceValue)
+// hashConcat computes BLAKE2b-256(a || b) for epoch nonce transitions.
+func hashConcat(a, b []byte) []byte {
+	h, _ := blake2b.New256(nil)
+	h.Write(a)
+	h.Write(b)
+	return h.Sum(nil)
 }
 
 // ProcessBlock processes a block's VRF output for nonce evolution.
@@ -253,10 +255,10 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 }
 
 // ComputeEpochNonce computes the epoch nonce for targetEpoch entirely from local chain data.
-// Streams all blocks from Shelley genesis, evolving the nonce via XOR and freezing at the
-// stability window (60%) of each epoch, then applying the TICKN transition rule:
+// Streams all blocks from Shelley genesis, evolving the nonce and freezing at the
+// stability window of each epoch, then computing:
 //
-//	η(new) = η_c XOR η_ph  (candidate nonce XOR previous block hash nonce)
+//	η(new) = BLAKE2b-256(η_c || η_ph)  (per pallas/cncli)
 func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) ([]byte, error) {
 	shelleyStart := ShelleyStartEpoch
 	if nt.networkMagic == PreprodNetworkMagic {
@@ -290,13 +292,13 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 			return nil, fmt.Errorf("scanning block: %w", err)
 		}
 
-		// Epoch transition — TICKN rule: η(new) = η_c ⊕ η_ph
+		// Epoch transition: η(new) = BLAKE2b-256(η_c || η_ph)
 		if epoch != currentEpoch {
 			if !candidateFrozen {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
 			}
-			eta0 = xorBytes(etaC, prevHashNonce)
+			eta0 = hashConcat(etaC, prevHashNonce)
 			if lastBlockHash != "" {
 				prevHashNonce, _ = hex.DecodeString(lastBlockHash)
 			}
@@ -339,7 +341,7 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 	if lastBlockHash != "" {
 		prevHashNonce, _ = hex.DecodeString(lastBlockHash)
 	}
-	result := xorBytes(etaC, prevHashNonce)
+	result := hashConcat(etaC, prevHashNonce)
 	log.Printf("Computed nonce for epoch %d: %s", targetEpoch, hex.EncodeToString(result))
 	return result, nil
 }
@@ -384,13 +386,13 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 			return fmt.Errorf("scanning block: %w", scanErr)
 		}
 
-		// Epoch transition — TICKN rule: η(new) = η_c ⊕ η_ph
+		// Epoch transition: η(new) = BLAKE2b-256(η_c || η_ph)
 		if epoch != currentEpoch {
 			if !candidateFrozen {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
 			}
-			eta0 = xorBytes(etaC, prevHashNonce)
+			eta0 = hashConcat(etaC, prevHashNonce)
 			if lastBlockHash != "" {
 				prevHashNonce, _ = hex.DecodeString(lastBlockHash)
 			}
