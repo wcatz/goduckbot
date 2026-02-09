@@ -98,55 +98,55 @@ func (i *Indexer) registerCommands() {
 
 	// Menu inline keyboard callbacks
 	i.bot.Handle(&btnMenuEpoch, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F4C5 Loading epoch..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdEpoch(m)
 	})
 	i.bot.Handle(&btnMenuTip, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F517 Loading tip..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdTip(m)
 	})
 	i.bot.Handle(&btnMenuBlocks, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F4E6 Loading blocks..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdBlocks(m)
 	})
 	i.bot.Handle(&btnMenuLeaderlog, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F4CB Loading leaderlog..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdLeaderlog(m)
 	})
 	i.bot.Handle(&btnMenuNonce, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F511 Loading nonce..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdNonce(m)
 	})
 	i.bot.Handle(&btnMenuStake, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F4B0 Loading stake..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdStake(m)
 	})
 	i.bot.Handle(&btnMenuPing, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F3D3 Pinging node..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdPing(m)
 	})
 	i.bot.Handle(&btnMenuDuck, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\U0001F986 Fetching duck..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdDuck(m)
 	})
 	i.bot.Handle(&btnMenuVersion, func(c *telebot.Callback) {
-		i.bot.Respond(c, &telebot.CallbackResponse{})
+		i.bot.Respond(c, &telebot.CallbackResponse{Text: "\u2139\uFE0F Loading version..."})
 		m := c.Message
 		m.Sender = c.Sender
 		i.cmdVersion(m)
