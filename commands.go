@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -84,7 +85,7 @@ func (i *Indexer) registerCommands() {
 	})
 
 	// Register command menu with Telegram so users see / autocomplete
-	err := i.bot.SetCommands([]telebot.Command{
+	commands := []telebot.Command{
 		{Text: "help", Description: "Show available commands"},
 		{Text: "status", Description: "DB sync status"},
 		{Text: "tip", Description: "Current chain tip"},
@@ -98,9 +99,23 @@ func (i *Indexer) registerCommands() {
 		{Text: "ping", Description: "Node connectivity check"},
 		{Text: "duck", Description: "Random duck (gif|img)"},
 		{Text: "version", Description: "Bot version info"},
+	}
+
+	// Set default scope (private chats)
+	if err := i.bot.SetCommands(commands); err != nil {
+		log.Printf("Failed to set default command menu: %v", err)
+	}
+
+	// Set group chat scope — telebot v2 doesn't support scoped SetCommands,
+	// so call the Telegram API directly with the scope parameter.
+	cmdsJSON, _ := json.Marshal(commands)
+	scopeJSON, _ := json.Marshal(map[string]string{"type": "all_group_chats"})
+	_, err := i.bot.Raw("setMyCommands", map[string]string{
+		"commands": string(cmdsJSON),
+		"scope":    string(scopeJSON),
 	})
 	if err != nil {
-		log.Printf("Failed to set bot command menu: %v", err)
+		log.Printf("Failed to set group command menu: %v", err)
 	}
 
 	log.Println("Bot commands registered")
