@@ -238,6 +238,24 @@ func (s *PgStore) GetBlockHash(ctx context.Context, slot uint64) (string, error)
 	return hash, err
 }
 
+func (s *PgStore) GetForgedSlots(ctx context.Context, epoch int) ([]uint64, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT slot FROM blocks WHERE epoch = $1 ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var slots []uint64
+	for rows.Next() {
+		var slot int64
+		if err := rows.Scan(&slot); err != nil {
+			return nil, err
+		}
+		slots = append(slots, uint64(slot))
+	}
+	return slots, rows.Err()
+}
+
 func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
 	rows := make([][]interface{}, len(blocks))
 	for i, b := range blocks {
