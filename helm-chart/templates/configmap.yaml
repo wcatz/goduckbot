@@ -45,11 +45,16 @@ data:
       {{- if .Values.config.duck.customUrl }}
       customUrl: {{ .Values.config.duck.customUrl | quote }}
       {{- end }}
-    {{- if .Values.config.leaderlog.enabled }}
+    {{- if or .Values.config.leaderlog.enabled .Values.config.leaderlog.vrfKeyValue }}
     leaderlog:
       enabled: true
+      {{- if .Values.config.leaderlog.vrfKeyValue }}
+      vrfKeyValue: {{ .Values.config.leaderlog.vrfKeyValue | quote }}
+      {{- else }}
       vrfKeyPath: {{ .Values.config.leaderlog.vrfKeyPath | quote }}
+      {{- end }}
       timezone: {{ .Values.config.leaderlog.timezone | quote }}
+      timeFormat: {{ .Values.config.leaderlog.timeFormat | default "12h" | quote }}
     database:
       driver: {{ .Values.config.database.driver | quote }}
       {{- if eq .Values.config.database.driver "sqlite" }}

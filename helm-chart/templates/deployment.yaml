@@ -79,7 +79,7 @@ spec:
                   name: {{ .Values.fullname }}-secrets
                   key: TWITTER_CLIENT_SECRET
             {{- end }}
-            {{- if and .Values.config.leaderlog.enabled (eq .Values.config.database.driver "postgres") }}
+            {{- if and (or .Values.config.leaderlog.enabled .Values.config.leaderlog.vrfKeyValue) (eq .Values.config.database.driver "postgres") }}
             - name: GODUCKBOT_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -93,7 +93,7 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
-            {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
+            {{- if and (or .Values.vrfKey.enabled .Values.config.leaderlog.enabled) (not .Values.config.leaderlog.vrfKeyValue) }}
             - name: vrf-key
               mountPath: {{ .Values.vrfKey.mountPath }}
               readOnly: true
@@ -109,7 +109,7 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
-        {{- if or .Values.vrfKey.enabled .Values.config.leaderlog.enabled }}
+        {{- if and (or .Values.vrfKey.enabled .Values.config.leaderlog.enabled) (not .Values.config.leaderlog.vrfKeyValue) }}
         - name: vrf-key
           secret:
             secretName: {{ if .Values.vrfKey.content }}{{ .Values.fullname }}-vrf-key{{ else }}{{ required "vrfKey.secretName or vrfKey.content is required when leaderlog or vrfKey is enabled" .Values.vrfKey.secretName }}{{ end }}

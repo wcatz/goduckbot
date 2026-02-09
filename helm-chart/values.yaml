@@ -44,8 +44,13 @@ config:
 
   leaderlog:
     enabled: false
+    # vrfKeyValue: inline CBOR hex (skips file mount, auto-enables leaderlog)
+    vrfKeyValue: ""
+    # vrfKeyPath: mount vrf.skey file (legacy, requires vrfKey volume)
     vrfKeyPath: "/keys/vrf.skey"
     timezone: ""
+    # Time format: "12h" or "24h"
+    timeFormat: "12h"
 
   database:
     driver: "sqlite"
