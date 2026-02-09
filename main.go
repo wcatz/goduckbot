@@ -105,9 +105,10 @@ type Indexer struct {
 	allowedGroups map[int64]bool
 	nodeQuery     *NodeQueryClient
 	// Leaderlog fields
-	vrfKey           *VRFKey
-	leaderlogEnabled bool
-	leaderlogTZ      string
+	vrfKey              *VRFKey
+	leaderlogEnabled    bool
+	leaderlogTZ         string
+	leaderlogTimeFormat string
 	store            Store
 	nonceTracker     *NonceTracker
 	leaderlogMu      sync.Mutex
@@ -357,14 +358,28 @@ func (i *Indexer) Start() error {
 	i.epoch = i.getCurrentEpoch()
 	log.Printf("Epoch: %d", i.epoch)
 
-	// Initialize leaderlog if enabled
+	// Initialize leaderlog
 	i.leaderlogEnabled = viper.GetBool("leaderlog.enabled")
 	i.leaderlogTZ = viper.GetString("leaderlog.timezone")
 	if i.leaderlogTZ == "" {
 		i.leaderlogTZ = "UTC"
 	}
+	i.leaderlogTimeFormat = viper.GetString("leaderlog.timeFormat")
+	if i.leaderlogTimeFormat != "24h" {
+		i.leaderlogTimeFormat = "12h"
+	}
 
-	if i.leaderlogEnabled {
+	// Load VRF key: prefer vrfKeyValue (inline CBOR hex), fall back to vrfKeyPath (file)
+	vrfKeyValue := viper.GetString("leaderlog.vrfKeyValue")
+	if vrfKeyValue != "" {
+		vrfKey, vrfErr := ParseVRFKeyCborHex(vrfKeyValue)
+		if vrfErr != nil {
+			log.Fatalf("failed to parse leaderlog.vrfKeyValue: %s", vrfErr)
+		}
+		i.vrfKey = vrfKey
+		i.leaderlogEnabled = true
+		log.Println("Leaderlog enabled, VRF key loaded from vrfKeyValue")
+	} else if i.leaderlogEnabled {
 		vrfKeyPath := viper.GetString("leaderlog.vrfKeyPath")
 		vrfKey, vrfErr := ParseVRFKeyFile(vrfKeyPath)
 		if vrfErr != nil {
@@ -372,7 +387,9 @@ func (i *Indexer) Start() error {
 		}
 		i.vrfKey = vrfKey
 		log.Printf("Leaderlog enabled, VRF key loaded from %s", vrfKeyPath)
+	}
 
+	if i.leaderlogEnabled {
 		// Initialize Store (SQLite or PostgreSQL)
 		store, dbErr := initStore()
 		if dbErr != nil {
@@ -1244,7 +1261,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 
 	// Post to Telegram if enabled
 	if i.telegramEnabled && i.bot != nil {
-		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ)
+		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 
 		channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
 		if err != nil {

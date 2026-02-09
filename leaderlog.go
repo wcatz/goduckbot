@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -98,6 +99,30 @@ func ParseVRFKeyFile(path string) (*VRFKey, error) {
 	keyBytes, err := hex.DecodeString(keyHex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode key hex: %w", err)
+	}
+
+	if len(keyBytes) != 64 {
+		return nil, fmt.Errorf("expected 64 bytes, got %d", len(keyBytes))
+	}
+
+	return &VRFKey{
+		PrivateKey: keyBytes[:32],
+		PublicKey:  keyBytes[32:],
+	}, nil
+}
+
+// ParseVRFKeyCborHex parses a VRF key directly from its CBOR hex string.
+// Accepts with or without the "5840" CBOR prefix.
+func ParseVRFKeyCborHex(cborHex string) (*VRFKey, error) {
+	cborHex = strings.TrimSpace(cborHex)
+	// Strip "5840" CBOR prefix if present
+	if len(cborHex) >= 4 && cborHex[:4] == "5840" {
+		cborHex = cborHex[4:]
+	}
+
+	keyBytes, err := hex.DecodeString(cborHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode VRF CBOR hex: %w", err)
 	}
 
 	if len(keyBytes) != 64 {
@@ -300,11 +325,19 @@ func SlotToEpoch(slot uint64, networkMagic int) int {
 	}
 }
 
-// FormatScheduleForTelegram creates a Telegram message from a schedule
-func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone string) string {
+// FormatScheduleForTelegram creates a Telegram message from a schedule.
+// timeFormat should be "12h" or "24h" (defaults to "12h").
+func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone, timeFormat string) string {
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
 		loc = time.UTC
+	}
+
+	timeFmt := "01/02/2006 03:04:05 PM"
+	fmtLabel := "12-hour"
+	if timeFormat == "24h" {
+		timeFmt = "01/02/2006 15:04:05"
+		fmtLabel = "24-hour"
 	}
 
 	performance := 0.0
@@ -319,11 +352,11 @@ func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone stri
 	msg += fmt.Sprintf("Ideal Blocks: %.2f\n\n", schedule.IdealSlots)
 
 	if len(schedule.AssignedSlots) > 0 {
-		msg += fmt.Sprintf("Assigned Slots Times in 12-hour Format (%s):\n", timezone)
+		msg += fmt.Sprintf("Assigned Slots in %s Format (%s):\n", fmtLabel, timezone)
 		for _, slot := range schedule.AssignedSlots {
 			localTime := slot.At.In(loc)
 			msg += fmt.Sprintf("  %s - Slot: %d  - B: %d\n",
-				localTime.Format("01/02/2006 03:04:05 PM"), slot.SlotInEpoch, slot.No)
+				localTime.Format(timeFmt), slot.SlotInEpoch, slot.No)
 		}
 	} else {
 		msg += "No slots assigned this epoch.\n"
