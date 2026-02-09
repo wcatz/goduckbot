@@ -175,12 +175,15 @@ func (i *Indexer) registerCommands() {
 		log.Printf("Failed to set default command menu: %v", err)
 	}
 
-	// Set group chat scope — telebot v2 doesn't support scoped SetCommands,
-	// so call the Telegram API directly with the scope parameter.
-	cmdsJSON, _ := json.Marshal(commands)
+	// Set group chat scope — only show /menu so users tap it instead of
+	// typing /command@botname. All other commands accessible via inline keyboard.
+	groupCmds := []telebot.Command{
+		{Text: "menu", Description: "Interactive command menu"},
+	}
+	groupCmdsJSON, _ := json.Marshal(groupCmds)
 	scopeJSON, _ := json.Marshal(map[string]string{"type": "all_group_chats"})
 	_, err := i.bot.Raw("setMyCommands", map[string]string{
-		"commands": string(cmdsJSON),
+		"commands": string(groupCmdsJSON),
 		"scope":    string(scopeJSON),
 	})
 	if err != nil {
@@ -415,7 +418,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		// Check DB first
 		stored, storeErr := i.store.GetLeaderSchedule(ctx, targetEpoch)
 		if storeErr == nil && stored != nil {
-			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ)
+			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 			i.bot.Send(m.Chat, msg)
 			return
 		}
@@ -510,7 +513,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			log.Printf("Failed to store schedule for epoch %d: %v", targetEpoch, storeScheduleErr)
 		}
 
-		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ)
+		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 		replyEpoch(msg)
 		return
 	}
@@ -521,7 +524,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	// Check for stored schedule first
 	stored, err := i.store.GetLeaderSchedule(ctx, targetEpoch)
 	if err == nil && stored != nil {
-		msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ)
+		msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 		i.bot.Send(m.Chat, msg)
 		return
 	}
@@ -587,7 +590,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		log.Printf("Failed to store schedule from /leaderlog: %v", storeErr)
 	}
 
-	msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ)
+	msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 	reply(msg)
 }
 
@@ -1000,12 +1003,17 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 
 	localTime := nextSlot.At.In(loc)
 
+	timeFmt := "01/02/2006 03:04:05 PM MST"
+	if i.leaderlogTimeFormat == "24h" {
+		timeFmt = "01/02/2006 15:04:05 MST"
+	}
+
 	msg := fmt.Sprintf("\U0001F4C5 Next Scheduled Block\n\n"+
 		"Slot: %d\n"+
 		"Time: %s\n"+
 		"Countdown: %s\n",
 		nextSlot.Slot,
-		localTime.Format("01/02/2006 03:04:05 PM MST"),
+		localTime.Format(timeFmt),
 		countdown)
 
 	i.bot.Send(m.Chat, msg)
