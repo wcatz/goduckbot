@@ -455,6 +455,241 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 	return nil
 }
 
+// IntegrityResult holds the verification result for a single epoch.
+type IntegrityResult struct {
+	Epoch     int
+	Computed  string // hex
+	DBStored  string // hex, or "n/a"
+	Koios     string // hex, or "n/a"
+	DBMatch   bool
+	KoiosMatch bool
+}
+
+// IntegrityReport is the summary of a full nonce integrity check.
+type IntegrityReport struct {
+	TotalEpochs    int
+	KoiosMatched   int
+	KoiosMismatched int
+	KoiosUnavail   int
+	DBMatched      int
+	DBMismatched   int
+	VrfErrors      int
+	TotalBlocks    int
+	Duration       time.Duration
+	FirstMismatch  int // epoch of first Koios mismatch, 0 if none
+}
+
+// NonceIntegrityCheck recomputes all epoch nonces from raw VRF outputs and
+// compares each against both the locally stored nonce and the Koios API.
+// This is the definitive end-to-end verification of the nonce pipeline.
+func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityReport, error) {
+	shelleyStart := ShelleyStartEpoch
+	if nt.networkMagic == PreprodNetworkMagic {
+		shelleyStart = PreprodShelleyStartEpoch
+	}
+
+	genesisHash, _ := hex.DecodeString(ShelleyGenesisHash)
+	etaV := make([]byte, 32)
+	copy(etaV, genesisHash)
+	etaC := make([]byte, 32)
+	prevHashNonce := make([]byte, 32) // NeutralNonce at Shelley start
+	var lastBlockHash string
+
+	currentEpoch := shelleyStart
+	candidateFrozen := false
+	blockCount := 0
+	vrfErrors := 0
+
+	// Collect computed nonces per epoch
+	type epochNonce struct {
+		epoch int
+		nonce []byte
+	}
+	var computed []epochNonce
+
+	start := time.Now()
+	log.Println("╔══════════════════════════════════════════════════════════════╗")
+	log.Println("║              NONCE INTEGRITY CHECK                          ║")
+	log.Println("║  Recomputing all epoch nonces from raw VRF outputs...       ║")
+	log.Println("╚══════════════════════════════════════════════════════════════╝")
+
+	// Phase 1: Stream all blocks, recompute from raw VRF output
+	rows, err := nt.store.StreamBlockVrfOutputs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("streaming VRF outputs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		epoch, slot, vrfOutput, storedNonce, blockHash, scanErr := rows.Scan()
+		if scanErr != nil {
+			return nil, fmt.Errorf("scanning block: %w", scanErr)
+		}
+
+		// Epoch transition
+		if epoch != currentEpoch {
+			if !candidateFrozen {
+				etaC = make([]byte, 32)
+				copy(etaC, etaV)
+			}
+			eta0 := hashConcat(etaC, prevHashNonce)
+			if lastBlockHash != "" {
+				prevHashNonce, _ = hex.DecodeString(lastBlockHash)
+			}
+
+			computed = append(computed, epochNonce{epoch: currentEpoch + 1, nonce: eta0})
+			currentEpoch = epoch
+			candidateFrozen = false
+		}
+
+		// Verify stored nonce_value matches recomputed
+		recomputedNonce := vrfNonceValue(vrfOutput)
+		if hex.EncodeToString(recomputedNonce) != hex.EncodeToString(storedNonce) {
+			vrfErrors++
+		}
+
+		// Evolve using recomputed nonce (not stored), ensuring end-to-end correctness
+		etaV = evolveNonce(etaV, recomputedNonce)
+		lastBlockHash = blockHash
+		blockCount++
+
+		// Freeze candidate at stability window
+		if !candidateFrozen {
+			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlots(nt.networkMagic)
+			if slot >= stabilitySlot {
+				etaC = make([]byte, 32)
+				copy(etaC, etaV)
+				candidateFrozen = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration: %w", err)
+	}
+
+	// Final epoch nonce (for the epoch after the last block)
+	if blockCount > 0 {
+		if !candidateFrozen {
+			etaC = make([]byte, 32)
+			copy(etaC, etaV)
+		}
+		if lastBlockHash != "" {
+			prevHashNonce, _ = hex.DecodeString(lastBlockHash)
+		}
+		eta0 := hashConcat(etaC, prevHashNonce)
+		computed = append(computed, epochNonce{epoch: currentEpoch + 1, nonce: eta0})
+	}
+
+	scanTime := time.Since(start)
+	log.Printf("Phase 1 complete: %d blocks scanned in %v (%d VRF nonce_value mismatches)",
+		blockCount, scanTime.Round(time.Millisecond), vrfErrors)
+
+	// Phase 2: Compare against DB stored nonces and Koios
+	report := &IntegrityReport{
+		TotalEpochs: len(computed),
+		TotalBlocks: blockCount,
+		VrfErrors:   vrfErrors,
+	}
+
+	log.Println("─────┬──────────────────────────────────────┬──────────┬──────────")
+	log.Println("Epoch│ Computed                             │ DB       │ Koios")
+	log.Println("─────┼──────────────────────────────────────┼──────────┼──────────")
+
+	for _, en := range computed {
+		if en.epoch <= shelleyStart {
+			continue
+		}
+
+		computedHex := hex.EncodeToString(en.nonce)
+
+		// Check DB
+		dbCtx, dbCancel := context.WithTimeout(ctx, 5*time.Second)
+		dbNonce, dbErr := nt.store.GetFinalNonce(dbCtx, en.epoch)
+		dbCancel()
+
+		dbStatus := "n/a"
+		if dbErr == nil && dbNonce != nil {
+			if hex.EncodeToString(dbNonce) == computedHex {
+				dbStatus = "✓ match"
+				report.DBMatched++
+			} else {
+				dbStatus = "✗ DIFF"
+				report.DBMismatched++
+			}
+		}
+
+		// Check Koios
+		koiosStatus := "n/a"
+		if nt.koiosClient != nil {
+			koiosCtx, koiosCancel := context.WithTimeout(ctx, 10*time.Second)
+			koiosNonce, koiosErr := nt.fetchNonceFromKoios(koiosCtx, en.epoch)
+			koiosCancel()
+
+			if koiosErr != nil {
+				koiosStatus = "unavail"
+				report.KoiosUnavail++
+			} else if hex.EncodeToString(koiosNonce) == computedHex {
+				koiosStatus = "✓ match"
+				report.KoiosMatched++
+			} else {
+				koiosStatus = "✗ MISMATCH"
+				report.KoiosMismatched++
+				if report.FirstMismatch == 0 {
+					report.FirstMismatch = en.epoch
+					log.Printf("  !! FIRST MISMATCH at epoch %d:", en.epoch)
+					log.Printf("     Computed: %s", computedHex)
+					log.Printf("     Koios:    %s", hex.EncodeToString(koiosNonce))
+				}
+			}
+
+			// Rate limit: small delay between Koios calls
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			report.KoiosUnavail++
+		}
+
+		// Print table row (truncated hash for readability)
+		display := computedHex
+		if len(display) > 36 {
+			display = display[:36] + "..."
+		}
+		log.Printf(" %3d │ %s │ %-8s │ %s", en.epoch, display, dbStatus, koiosStatus)
+	}
+
+	report.Duration = time.Since(start)
+
+	log.Println("─────┴──────────────────────────────────────┴──────────┴──────────")
+	log.Println("")
+	log.Println("╔══════════════════════════════════════════════════════════════╗")
+	if report.KoiosMismatched == 0 && report.VrfErrors == 0 {
+		log.Printf("║  ✓  ALL %d EPOCHS VERIFIED                                  ║", report.KoiosMatched)
+	} else {
+		log.Printf("║  ✗  INTEGRITY ISSUES FOUND                                  ║")
+	}
+	log.Println("╠══════════════════════════════════════════════════════════════╣")
+	log.Printf("║  Epochs checked:     %-6d                                  ║", report.TotalEpochs)
+	log.Printf("║  Koios matched:      %-6d                                  ║", report.KoiosMatched)
+	if report.KoiosMismatched > 0 {
+		log.Printf("║  Koios MISMATCHED:   %-6d  (first: epoch %d)              ║", report.KoiosMismatched, report.FirstMismatch)
+	}
+	if report.KoiosUnavail > 0 {
+		log.Printf("║  Koios unavailable:  %-6d                                  ║", report.KoiosUnavail)
+	}
+	log.Printf("║  DB matched:         %-6d                                  ║", report.DBMatched)
+	if report.DBMismatched > 0 {
+		log.Printf("║  DB MISMATCHED:      %-6d                                  ║", report.DBMismatched)
+	}
+	log.Printf("║  Blocks processed:   %-10d                              ║", report.TotalBlocks)
+	if report.VrfErrors > 0 {
+		log.Printf("║  VRF nonce errors:   %-6d  (stored nonce_value wrong)      ║", report.VrfErrors)
+	}
+	log.Printf("║  Total time:         %-10v                              ║", report.Duration.Round(time.Millisecond))
+	log.Println("╚══════════════════════════════════════════════════════════════╝")
+
+	return report, nil
+}
+
 // fetchNonceFromKoios fetches the epoch nonce from Koios API.
 func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]byte, error) {
 	epochNo := koios.EpochNo(epoch)
