@@ -327,14 +327,14 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 	currentEpoch := shelleyStart
 	candidateFrozen := false
 
-	rows, err := nt.store.StreamBlockNonces(ctx)
+	rows, err := nt.store.StreamBlockVrfOutputs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("streaming blocks: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		epoch, slot, nonceValue, blockHash, err := rows.Scan()
+		epoch, slot, vrfOutput, _, blockHash, err := rows.Scan()
 		if err != nil {
 			return nil, fmt.Errorf("scanning block: %w", err)
 		}
@@ -385,6 +385,8 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 			labNonce, _ = hex.DecodeString(prevBlockHash)
 		}
 
+		// Recompute era-aware nonce from raw VRF output (don't trust stored nonce_value)
+		nonceValue := vrfNonceValueForEpoch(vrfOutput, epoch, nt.networkMagic)
 		etaV = evolveNonce(etaV, nonceValue)
 		prevBlockHash = blockHash
 	}
@@ -440,14 +442,14 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 	start := time.Now()
 	log.Printf("Nonce backfill starting from epoch %d...", shelleyStart)
 
-	rows, err := nt.store.StreamBlockNonces(ctx)
+	rows, err := nt.store.StreamBlockVrfOutputs(ctx)
 	if err != nil {
 		return fmt.Errorf("streaming blocks: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		epoch, slot, nonceValue, blockHash, scanErr := rows.Scan()
+		epoch, slot, vrfOutput, _, blockHash, scanErr := rows.Scan()
 		if scanErr != nil {
 			return fmt.Errorf("scanning block: %w", scanErr)
 		}
@@ -508,6 +510,8 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 			labNonce, _ = hex.DecodeString(prevBlockHash)
 		}
 
+		// Recompute era-aware nonce from raw VRF output (don't trust stored nonce_value)
+		nonceValue := vrfNonceValueForEpoch(vrfOutput, epoch, nt.networkMagic)
 		etaV = evolveNonce(etaV, nonceValue)
 		prevBlockHash = blockHash
 	}
