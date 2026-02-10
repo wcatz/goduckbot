@@ -68,13 +68,36 @@ func initialNonce(fullMode bool) []byte {
 	return make([]byte, 32)
 }
 
-// vrfNonceValue computes the nonce contribution from a VRF output.
+// vrfNonceValue computes the nonce contribution from a VRF output (Shelley-Alonzo).
 // nonceValue = BLAKE2b-256(vrfOutput)
-// Verified against pallas/cncli test vectors (no domain prefix).
 func vrfNonceValue(vrfOutput []byte) []byte {
 	h, _ := blake2b.New256(nil)
 	h.Write(vrfOutput)
 	return h.Sum(nil)
+}
+
+// vrfNonceValueForEpoch computes the era-correct nonce contribution.
+// Shelley-Alonzo (TPraos): BLAKE2b-256(raw NonceVrf output)
+// Babbage+ (CPraos): BLAKE2b-256(BLAKE2b-256("N" || raw VrfResult output))
+// The Babbage domain separator matches cncli/pallas derive_tagged_vrf_output.
+func vrfNonceValueForEpoch(vrfOutput []byte, epoch, networkMagic int) []byte {
+	babbageStart := BabbageStartEpoch
+	if networkMagic == PreprodNetworkMagic {
+		babbageStart = PreprodBabbageStartEpoch
+	}
+
+	if epoch >= babbageStart {
+		// Domain-separated: BLAKE2b-256(0x4E || vrfOutput)
+		h1, _ := blake2b.New256(nil)
+		h1.Write([]byte{0x4E})
+		h1.Write(vrfOutput)
+		tagged := h1.Sum(nil)
+		// Hash again to match cncli generate_rolling_nonce(BLAKE2b-256(eta_vrf_0))
+		h2, _ := blake2b.New256(nil)
+		h2.Write(tagged)
+		return h2.Sum(nil)
+	}
+	return vrfNonceValue(vrfOutput)
 }
 
 // evolveNonce updates the evolving nonce with a new nonce contribution.
@@ -122,8 +145,8 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 		// In both cases, the nonce just continues from wherever it was.
 	}
 
-	// Compute nonce contribution
-	nonceValue := vrfNonceValue(vrfOutput)
+	// Compute nonce contribution (era-aware: Babbage+ uses 0x4E domain separator)
+	nonceValue := vrfNonceValueForEpoch(vrfOutput, epoch, nt.networkMagic)
 
 	// Insert block first — if it's a duplicate (already exists), skip nonce evolution
 	// to prevent corrupting the evolving nonce on restart.
@@ -172,7 +195,7 @@ func (nt *NonceTracker) ProcessBatch(blocks []BlockData) {
 			nt.candidateFroze = false
 		}
 
-		nonceValue := vrfNonceValue(b.VrfOutput)
+		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, nt.networkMagic)
 		nt.evolvingNonce = evolveNonce(nt.evolvingNonce, nonceValue)
 		nt.blockCount++
 	}
@@ -318,10 +341,10 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 		etaV = evolveNonce(etaV, nonceValue)
 		lastBlockHash = blockHash
 
-		// Freeze candidate at stability window
+		// Freeze candidate at era-correct stability window
 		if !candidateFrozen {
 			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
-			stabilitySlot := epochStart + StabilityWindowSlots(nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(epoch, nt.networkMagic)
 			if slot >= stabilitySlot {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
@@ -421,7 +444,7 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 		// Freeze candidate at stability window
 		if !candidateFrozen {
 			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
-			stabilitySlot := epochStart + StabilityWindowSlots(nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(epoch, nt.networkMagic)
 			if slot >= stabilitySlot {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
@@ -542,8 +565,8 @@ func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityRepo
 			candidateFrozen = false
 		}
 
-		// Verify stored nonce_value matches recomputed
-		recomputedNonce := vrfNonceValue(vrfOutput)
+		// Verify stored nonce_value matches recomputed (era-aware)
+		recomputedNonce := vrfNonceValueForEpoch(vrfOutput, epoch, nt.networkMagic)
 		if hex.EncodeToString(recomputedNonce) != hex.EncodeToString(storedNonce) {
 			vrfErrors++
 		}
@@ -556,7 +579,7 @@ func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityRepo
 		// Freeze candidate at stability window
 		if !candidateFrozen {
 			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
-			stabilitySlot := epochStart + StabilityWindowSlots(nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(epoch, nt.networkMagic)
 			if slot >= stabilitySlot {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)

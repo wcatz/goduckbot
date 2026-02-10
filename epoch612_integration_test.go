@@ -92,10 +92,10 @@ func TestEpoch612LeaderSchedule(t *testing.T) {
 		lastBlockHash = blockHash
 		blockCount++
 
-		// Freeze candidate at 60% stability window
+		// Freeze candidate at era-correct stability window
 		if !candidateFrozen {
 			epochStart := GetEpochStartSlot(epoch, MainnetNetworkMagic)
-			stabilitySlot := epochStart + StabilityWindowSlots(MainnetNetworkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(epoch, MainnetNetworkMagic)
 			if slot >= stabilitySlot {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
