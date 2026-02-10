@@ -13,10 +13,11 @@ import (
 
 // BlockData holds block information for batch processing during chain sync.
 type BlockData struct {
-	Slot      uint64
-	Epoch     int
-	BlockHash string
-	VrfOutput []byte
+	Slot         uint64
+	Epoch        int
+	BlockHash    string
+	VrfOutput    []byte
+	NetworkMagic int
 }
 
 // BlockNonceRows is an iterator over blocks for nonce computation.
@@ -330,7 +331,7 @@ func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) 
 	defer stmt.Close()
 
 	for _, b := range blocks {
-		nonceValue := vrfNonceValue(b.VrfOutput)
+		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, b.NetworkMagic)
 		if _, err := stmt.ExecContext(ctx, int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue); err != nil {
 			return fmt.Errorf("insert slot %d: %w", b.Slot, err)
 		}
