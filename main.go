@@ -573,7 +573,7 @@ func (i *Indexer) runChainTail() error {
 				i.networkMagic,
 				i.nodeAddresses[0],
 				func(slot uint64, epoch int, blockHash string, vrfOutput []byte) {
-					blockCh <- BlockData{Slot: slot, Epoch: epoch, BlockHash: blockHash, VrfOutput: vrfOutput}
+					blockCh <- BlockData{Slot: slot, Epoch: epoch, BlockHash: blockHash, VrfOutput: vrfOutput, NetworkMagic: i.networkMagic}
 				},
 				onCaughtUp,
 			)

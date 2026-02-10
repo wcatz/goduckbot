@@ -259,7 +259,7 @@ func (s *PgStore) GetForgedSlots(ctx context.Context, epoch int) ([]uint64, erro
 func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
 	rows := make([][]interface{}, len(blocks))
 	for i, b := range blocks {
-		nonceValue := vrfNonceValue(b.VrfOutput)
+		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, b.NetworkMagic)
 		rows[i] = []interface{}{int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue}
 	}
 	_, err := s.pool.CopyFrom(ctx,
