@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -824,32 +827,45 @@ func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityRepo
 	return report, nil
 }
 
-// fetchNonceFromKoios fetches the epoch nonce from Koios API.
+// fetchNonceFromKoios fetches the epoch nonce from Koios REST API.
+// Uses raw HTTP instead of the Go client to avoid cost_models JSON unmarshal issues.
 func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]byte, error) {
-	epochNo := koios.EpochNo(epoch)
-	res, err := nt.koiosClient.GetEpochParams(ctx, &epochNo, nil)
+	url := fmt.Sprintf("https://api.koios.rest/api/v1/epoch_params?_epoch_no=%d&select=nonce", epoch)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("koios GetEpochParams: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("koios HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	if len(res.Data) == 0 {
-		return nil, fmt.Errorf("no epoch params returned for epoch %d", epoch)
+	var result []struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+	if len(result) == 0 || result[0].Nonce == "" {
+		return nil, fmt.Errorf("no nonce returned for epoch %d", epoch)
 	}
 
-	nonceHex := res.Data[0].Nonce
-	if nonceHex == "" {
-		return nil, fmt.Errorf("empty nonce for epoch %d", epoch)
-	}
-
-	nonce, err := hex.DecodeString(nonceHex)
+	nonce, err := hex.DecodeString(result[0].Nonce)
 	if err != nil {
 		return nil, fmt.Errorf("decoding nonce hex: %w", err)
 	}
-
 	if len(nonce) != 32 {
-		return nil, fmt.Errorf("unexpected nonce length: %d (expected 32)", len(nonce))
+		return nil, fmt.Errorf("unexpected nonce length: %d", len(nonce))
 	}
 
-	log.Printf("Fetched nonce from Koios for epoch %d: %s", epoch, nonceHex)
 	return nonce, nil
 }
