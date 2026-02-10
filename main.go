@@ -722,11 +722,11 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	// Log clean block line: slot, hash, nonce (VRF output)
 	vrfHex := ""
 	if vrfOutput != nil {
-		vrfHex = truncHash(hex.EncodeToString(vrfOutput), 16)
+		vrfHex = hex.EncodeToString(vrfOutput)
 	}
 	log.Printf("[block] slot %d | hash %s | nonce %s | interval %s",
 		blockEvent.Context.SlotNumber,
-		truncHash(blockEvent.Payload.BlockHash, 16),
+		blockEvent.Payload.BlockHash,
 		vrfHex, timeDiffString)
 
 	// Customize links based on the network magic number

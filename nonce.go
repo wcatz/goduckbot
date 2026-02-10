@@ -477,6 +477,24 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 				copy(lastEpochBlockNonce, labNonce)
 			}
 
+			// Verify against Koios — use Koios value on mismatch (workaround for
+			// gouroboros VRF data divergence in Babbage-era blocks).
+			if nt.koiosClient != nil {
+				koiosCtx, koiosCancel := context.WithTimeout(ctx, 10*time.Second)
+				koiosNonce, koiosErr := nt.fetchNonceFromKoios(koiosCtx, epoch)
+				koiosCancel()
+				if koiosErr == nil {
+					computedHex := hex.EncodeToString(eta0)
+					koiosHex := hex.EncodeToString(koiosNonce)
+					if computedHex != koiosHex {
+						log.Printf("Epoch %d: computed %s… != Koios %s… — using Koios",
+							epoch, computedHex[:16], koiosHex[:16])
+						eta0 = koiosNonce
+					}
+				}
+				time.Sleep(50 * time.Millisecond) // rate limit
+			}
+
 			// Cache if not already present
 			existing, _ := nt.store.GetFinalNonce(ctx, epoch)
 			if existing == nil {
