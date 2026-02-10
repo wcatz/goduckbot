@@ -406,36 +406,7 @@ func (i *Indexer) Start() error {
 		i.scheduleExists = make(map[int]bool)
 		log.Println("Nonce tracker initialized")
 
-		// Full mode startup tasks (sequential: backfill → integrity check → schedule backfill)
-		if fullMode {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-				defer cancel()
-
-				// Step 1: Backfill nonce history
-				if err := i.nonceTracker.BackfillNonces(ctx); err != nil {
-					log.Printf("Nonce backfill failed: %v", err)
-					return
-				}
-
-				// Step 2: Nonce integrity check (optional)
-				if viper.GetBool("leaderlog.nonceIntegrityCheck") {
-					report, err := i.nonceTracker.NonceIntegrityCheck(ctx)
-					if err != nil {
-						log.Printf("Nonce integrity check failed: %v", err)
-					} else if report.KoiosMismatched > 0 {
-						log.Printf("WARNING: %d epoch nonce mismatches detected!", report.KoiosMismatched)
-					}
-				}
-
-				// Step 3: Schedule history backfill (optional)
-				if viper.GetBool("leaderlog.backfillSchedules") {
-					if err := i.backfillSchedules(ctx); err != nil {
-						log.Printf("Schedule backfill failed: %v", err)
-					}
-				}
-			}()
-		}
+		// Nonce backfill runs after historical sync (see runChainTail)
 	}
 
 	// Convert the poolId to Bech32
@@ -596,6 +567,32 @@ func (i *Indexer) runChainTail() error {
 		close(blockCh)
 		<-writerDone // wait for DB writer to flush
 		log.Println("Historical sync complete, transitioning to live tail...")
+
+		// Run nonce backfill after sync so blocks table has data
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+
+			if err := i.nonceTracker.BackfillNonces(ctx); err != nil {
+				log.Printf("Nonce backfill failed: %v", err)
+				return
+			}
+
+			if viper.GetBool("leaderlog.nonceIntegrityCheck") {
+				report, err := i.nonceTracker.NonceIntegrityCheck(ctx)
+				if err != nil {
+					log.Printf("Nonce integrity check failed: %v", err)
+				} else if report.KoiosMismatched > 0 {
+					log.Printf("WARNING: %d epoch nonce mismatches detected!", report.KoiosMismatched)
+				}
+			}
+
+			if viper.GetBool("leaderlog.backfillSchedules") {
+				if err := i.backfillSchedules(ctx); err != nil {
+					log.Printf("Schedule backfill failed: %v", err)
+				}
+			}
+		}()
 	}
 
 	// Start adder pipeline for live chain tail (both full and lite mode)
