@@ -111,6 +111,62 @@ func TestInitialNonceFullMode(t *testing.T) {
 	}
 }
 
+func TestVrfNonceValueForEpochShelley(t *testing.T) {
+	// Shelley era (epoch 208) — no domain separator, same as vrfNonceValue
+	vrfOutput, _ := hex.DecodeString("36ec5378d1f5041a59eb8d96e61de96f0950fb41b49ff511f7bc7fd109d4383e1d24be7034e6749c6612700dd5ceb0c66577b88a19ae286b1321d15bce1ab736")
+	got := vrfNonceValueForEpoch(vrfOutput, 208, MainnetNetworkMagic)
+	want := vrfNonceValue(vrfOutput)
+	if hex.EncodeToString(got) != hex.EncodeToString(want) {
+		t.Fatalf("Shelley era should match vrfNonceValue:\n  got:  %s\n  want: %s",
+			hex.EncodeToString(got), hex.EncodeToString(want))
+	}
+}
+
+func TestVrfNonceValueForEpochBabbage(t *testing.T) {
+	// Babbage era (epoch 365+) — needs 0x4E domain separator + double hash
+	vrfOutput := make([]byte, 64)
+	for i := range vrfOutput {
+		vrfOutput[i] = byte(i)
+	}
+	got := vrfNonceValueForEpoch(vrfOutput, 365, MainnetNetworkMagic)
+
+	// Expected: BLAKE2b-256(BLAKE2b-256(0x4E || vrfOutput))
+	h1, _ := blake2b.New256(nil)
+	h1.Write([]byte{0x4E})
+	h1.Write(vrfOutput)
+	tagged := h1.Sum(nil)
+	h2, _ := blake2b.New256(nil)
+	h2.Write(tagged)
+	want := h2.Sum(nil)
+
+	if hex.EncodeToString(got) != hex.EncodeToString(want) {
+		t.Fatalf("Babbage era domain separator mismatch:\n  got:  %s\n  want: %s",
+			hex.EncodeToString(got), hex.EncodeToString(want))
+	}
+
+	// Must differ from non-domain-separated
+	plain := vrfNonceValue(vrfOutput)
+	if hex.EncodeToString(got) == hex.EncodeToString(plain) {
+		t.Fatal("Babbage nonce should differ from Shelley (domain separator missing)")
+	}
+}
+
+func TestStabilityWindowTPraos(t *testing.T) {
+	// Epoch 208 (Shelley/TPraos): 3k/f = 129600 margin → freeze at 302400
+	got := StabilityWindowSlotsForEpoch(208, MainnetNetworkMagic)
+	if got != 302400 {
+		t.Fatalf("TPraos stability window: got %d, want 302400", got)
+	}
+}
+
+func TestStabilityWindowCPraos(t *testing.T) {
+	// Epoch 365 (Babbage/CPraos): 4k/f = 172800 margin → freeze at 259200
+	got := StabilityWindowSlotsForEpoch(365, MainnetNetworkMagic)
+	if got != 259200 {
+		t.Fatalf("CPraos stability window: got %d, want 259200", got)
+	}
+}
+
 func TestInitialNonceLiteMode(t *testing.T) {
 	nonce := initialNonce(false)
 
