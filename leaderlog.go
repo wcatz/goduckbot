@@ -42,6 +42,12 @@ const (
 
 	// PreprodShelleyStartEpoch is the first Shelley epoch on preprod
 	PreprodShelleyStartEpoch = 4
+
+	// BabbageStartEpoch is the first Babbage (CPraos) epoch on mainnet (Vasil hard fork)
+	BabbageStartEpoch = 365
+
+	// PreprodBabbageStartEpoch is the first Babbage epoch on preprod
+	PreprodBabbageStartEpoch = 12
 )
 
 // LeaderSlot represents an assigned slot in the schedule
@@ -289,18 +295,36 @@ func GetEpochLength(networkMagic int) uint64 {
 	return MainnetEpochLength
 }
 
-// StabilityWindowSlots returns the number of slots into an epoch at which
-// the candidate nonce freezes. In Cardano CPRAOS this is epochLength - 4k/f
-// where k=2160 and f=0.05, giving 259200 slots (60% of mainnet epoch).
+// StabilityWindowSlots returns the CPraos stability window (current era).
+// Use StabilityWindowSlotsForEpoch for historical computation.
 func StabilityWindowSlots(networkMagic int) uint64 {
+	return StabilityWindowSlotsForEpoch(BabbageStartEpoch, networkMagic)
+}
+
+// StabilityWindowSlotsForEpoch returns the era-correct stability window.
+// TPraos (Shelley-Alonzo): 3k/f = 129600 margin → freeze at 302400 (70%)
+// CPraos (Babbage+): 4k/f = 172800 margin → freeze at 259200 (60%)
+func StabilityWindowSlotsForEpoch(epoch, networkMagic int) uint64 {
 	epochLen := GetEpochLength(networkMagic)
-	// 4k/f = 4 * 2160 / 0.05 = 172800 slots before epoch end
-	const stabilityMargin = 172800
-	if epochLen <= stabilityMargin {
-		// Preview has 86400 slots — use 60% proportionally
-		return epochLen * 60 / 100
+	babbageStart := BabbageStartEpoch
+	if networkMagic == PreprodNetworkMagic {
+		babbageStart = PreprodBabbageStartEpoch
 	}
-	return epochLen - stabilityMargin
+
+	var margin uint64
+	if epoch >= babbageStart {
+		margin = 172800 // 4k/f (CPraos)
+	} else {
+		margin = 129600 // 3k/f (TPraos)
+	}
+
+	if epochLen <= margin {
+		if epoch >= babbageStart {
+			return epochLen * 60 / 100
+		}
+		return epochLen * 70 / 100
+	}
+	return epochLen - margin
 }
 
 // SlotToEpoch returns the epoch number for a given slot.
