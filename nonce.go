@@ -19,14 +19,9 @@ import (
 // Used as the initial eta_v seed for full chain sync nonce evolution.
 const ShelleyGenesisHash = "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81"
 
-// knownEpochNonces contains hardcoded epoch nonces for early Shelley epochs
-// where the D parameter (decentralisation) transition makes self-computation
-// unreliable. Epochs 208-209 compute correctly; 210-211 are affected by the
-// D=1→0.96 transition. From epoch 212 onward, self-computation matches Koios.
-var knownEpochNonces = map[int]string{
-	210: "61f6c54f7f47f2e6b2fae5c4fa82c4125298f0f56ec4b400c8aa2b61e67daa20",
-	211: "4b16efae7144bfc96cac5e8b8ab5de4ff0de030e10d044e72aac38013b64eea5",
-}
+// knownEpochNonces is empty — self-computation from genesis produces correct
+// nonces for all epochs including early Shelley (verified against Koios).
+var knownEpochNonces = map[int]string{}
 
 // NonceTracker accumulates VRF nonce contributions from chain sync blocks
 // and evolves the epoch nonce for leader schedule calculation.
