@@ -27,7 +27,7 @@ LABEL org.opencontainers.image.title="goduckbot" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT_SHA}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.source="https://github.com/wayne/goduckbot"
+      org.opencontainers.image.source="https://github.com/wcatz/goduckbot"
 
 WORKDIR /app
 COPY --from=builder /app/goduckbot /app/goduckbot
