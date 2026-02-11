@@ -62,12 +62,17 @@ func (c *NodeQueryClient) Close() error {
 // withQuery creates a connection, acquires volatile tip, runs fn, then releases and closes.
 // The ctx is used to enforce caller timeouts — gouroboros methods don't accept context
 // natively, so the query runs in a goroutine and aborts if the context expires.
+// CRITICAL: If the context expires, the connection is closed to unblock the goroutine.
 func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequery.Client) error) error {
 	type result struct{ err error }
 	ch := make(chan result, 1)
+	connClosed := make(chan struct{})
+
+	var conn *ouroboros.Connection
 
 	go func() {
-		conn, err := ouroboros.NewConnection(
+		var err error
+		conn, err = ouroboros.NewConnection(
 			ouroboros.WithNetworkMagic(c.networkMagic),
 			ouroboros.WithNodeToNode(false),
 			ouroboros.WithKeepAlive(false),
@@ -81,7 +86,10 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 			ch <- result{fmt.Errorf("creating connection: %w", err)}
 			return
 		}
-		defer conn.Close()
+		defer func() {
+			conn.Close()
+			close(connClosed)
+		}()
 
 		network, address := parseNodeAddress(c.nodeAddress)
 		if err := conn.Dial(network, address); err != nil {
@@ -107,6 +115,12 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 
 	select {
 	case <-ctx.Done():
+		// Context expired — close the connection to unblock the goroutine
+		if conn != nil {
+			conn.Close()
+		}
+		// Wait for goroutine cleanup
+		<-connClosed
 		return ctx.Err()
 	case r := <-ch:
 		return r.err
@@ -185,13 +199,19 @@ func (c *NodeQueryClient) QueryPoolStakeSnapshots(ctx context.Context, poolIdBec
 		return nil, fmt.Errorf("invalid pool ID %s: %w", poolIdBech32, err)
 	}
 
+	// CRITICAL: Use Blake2b224(poolId) instead of poolId directly.
+	// PoolId is [28]byte with no MarshalCBOR method. Blake2b224 is the same
+	// underlying bytes but HAS a MarshalCBOR that encodes as CBOR bytestring.
+	// Without this, the CBOR encoder treats [28]byte as a CBOR array, which
+	// the node doesn't recognize, causing it to return all pools (~3000+).
+	poolHash := ledger.Blake2b224(poolId)
+
 	var snapshots *StakeSnapshots
 	err = c.withQuery(ctx, func(client *localstatequery.Client) error {
-		result, qErr := client.GetStakeSnapshots([]any{poolId})
+		result, qErr := client.GetStakeSnapshots([]any{poolHash})
 		if qErr != nil {
 			return fmt.Errorf("GetStakeSnapshots: %w", qErr)
 		}
-		poolHash := ledger.Blake2b224(poolId)
 		poolSnap, ok := result.PoolSnapshots[poolHash]
 		if !ok {
 			return fmt.Errorf("pool %s not found in snapshot result", poolIdBech32)
