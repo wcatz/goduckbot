@@ -1280,14 +1280,14 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 		return false
 	}
 
-	// Get pool + network stake (NtC mark snapshot first, 60s timeout, Koios fallback)
+	// Get pool + network stake (NtC mark snapshot first, 5min timeout, Koios fallback)
 	var poolStake, totalStake uint64
 	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
+		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
 		snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 		ntcCancel()
 		if snapErr != nil {
-			log.Printf("NtC stake query failed for auto-leaderlog (60s timeout), trying Koios: %v", snapErr)
+			log.Printf("NtC stake query failed for auto-leaderlog, trying Koios: %v", snapErr)
 		} else {
 			poolStake = snapshots.PoolStakeMark
 			totalStake = snapshots.TotalStakeMark

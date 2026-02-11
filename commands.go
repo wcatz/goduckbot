@@ -466,7 +466,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 				ntcAvailable = false
 			}
 			if ntcAvailable {
-				ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
+				ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
 				snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 				ntcCancel()
 				if snapErr != nil {
@@ -559,8 +559,8 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	// Get stake from node — mark for next epoch, set for current (60s timeout)
-	ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
+	// Get stake from node — mark for next epoch, set for current (5min timeout)
+	ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
 	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 	ntcCancel()
 	if err != nil {
@@ -705,9 +705,9 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	var poolStake, totalStake uint64
 	source := "NtC"
 
-	// Try NtC first with 5s timeout
+	// Try NtC first with 5min timeout
 	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Second)
+		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
 		snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 		ntcCancel()
 		if err != nil {
@@ -946,11 +946,11 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 
 		var poolStake, totalStake uint64
 		if i.nodeQuery != nil {
-			ntcCtx, ntcCancel := context.WithTimeout(ctx, 60*time.Second)
+			ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
 			snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 			ntcCancel()
 			if snapErr != nil {
-				log.Printf("NtC stake query failed (60s timeout), trying Koios fallback: %v", snapErr)
+				log.Printf("NtC stake query failed, trying Koios fallback: %v", snapErr)
 			} else {
 				poolStake = snapshots.PoolStakeSet
 				totalStake = snapshots.TotalStakeSet
