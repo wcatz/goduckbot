@@ -699,15 +699,12 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
 	var poolStake, totalStake uint64
 	source := "NtC"
 
-	// Try NtC first with 5min timeout
+	// Try NtC first with 2min timeout (fresh context so Koios fallback isn't starved)
 	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
+		ntcCtx, ntcCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
 		ntcCancel()
 		if err != nil {
@@ -718,18 +715,19 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 		}
 	}
 
-	// Koios fallback
+	// Koios fallback (fresh context so NtC timeout doesn't starve it)
 	if poolStake == 0 && i.koios != nil {
-		source = "Koios (NtC socat stalled)"
+		source = "Koios"
+		koiosCtx, koiosCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		currentEpoch := i.getCurrentEpoch()
 		for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
 			epochNo := koios.EpochNo(tryEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			poolHist, histErr := i.koios.GetPoolHistory(koiosCtx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
 			if histErr != nil || len(poolHist.Data) == 0 {
 				continue
 			}
 			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			epochInfo, infoErr := i.koios.GetEpochInfo(koiosCtx, &epochNo, nil)
 			if infoErr != nil || len(epochInfo.Data) == 0 {
 				poolStake = 0
 				continue
@@ -737,6 +735,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
 			break
 		}
+		koiosCancel()
 	}
 
 	if poolStake == 0 || totalStake == 0 {
