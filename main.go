@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/adder/event"
@@ -73,6 +74,9 @@ var globalIndexer = &Indexer{}
 var prevBlockTimestamp time.Time
 var timeDiffString string
 
+// Tracks goroutines leaked when pipeline.Stop() times out
+var abandonedPipelines int64 // atomic
+
 // Indexer struct to manage the adder pipeline and block events
 type Indexer struct {
 	pipeline        *pipeline.Pipeline
@@ -116,6 +120,7 @@ type Indexer struct {
 	leaderlogFailed  map[int]time.Time // cooldown: epoch -> last failure time
 	scheduleExists   map[int]bool      // cached: epoch -> schedule already in DB
 	syncer           *ChainSyncer // nil in lite mode
+	lastBlockTime    int64        // atomic: unix timestamp of last block received
 }
 
 type BlockEvent struct {
@@ -600,8 +605,10 @@ func (i *Indexer) runChainTail() error {
 }
 
 // startAdderPipeline starts the adder pipeline for live chain tail.
-// It runs an infinite restart loop: on pipeline error, it stops, waits, and reconnects.
-// Auto-reconnect is disabled because it orphans the event channel after reconnect.
+// It runs an infinite restart loop: on pipeline error or stall, it stops, waits, and reconnects.
+// Auto-reconnect is disabled because adder orphans the event channel after reconnect.
+// A stall detector goroutine monitors lastBlockTime and forces a restart if no blocks
+// arrive for 2 minutes (catches zombie state where pipeline.Stop() previously hung).
 func (i *Indexer) startAdderPipeline() error {
 	hosts := i.nodeAddresses
 
@@ -631,6 +638,9 @@ func (i *Indexer) startAdderPipeline() error {
 				output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
 				i.pipeline.AddOutput(output)
 
+				// Reset interval tracking before Start() spawns event goroutines
+				prevBlockTimestamp = time.Time{}
+
 				err := i.pipeline.Start()
 				if err != nil {
 					log.Printf("Failed to start pipeline on %s: %s. Retrying...", host, err)
@@ -648,15 +658,71 @@ func (i *Indexer) startAdderPipeline() error {
 
 			log.Printf("Pipeline connected to node at %s", host)
 			connected = true
+			atomic.StoreInt64(&i.lastBlockTime, time.Now().Unix())
 
-			// Block until pipeline error (connection drop without auto-reconnect = error)
-			pipelineErr := <-i.pipeline.ErrorChan()
-			log.Printf("Pipeline error: %s", pipelineErr)
+			// Start stall detector — forces restart if no blocks for 2 minutes.
+			// This catches the zombie state where pipeline.Stop() hangs or the
+			// pipeline silently stops delivering blocks after a reconnect.
+			stallCh := make(chan struct{})
+			stallDone := make(chan struct{})
+			go func() {
+				defer close(stallDone)
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						lastSeen := atomic.LoadInt64(&i.lastBlockTime)
+						if lastSeen > 0 {
+							stale := time.Since(time.Unix(lastSeen, 0))
+							if stale > 2*time.Minute {
+								log.Printf("Pipeline stall detected (no blocks for %s), forcing restart",
+									stale.Round(time.Second))
+								close(stallCh)
+								return
+							}
+						}
+					case <-stallCh:
+						return
+					}
+				}
+			}()
 
-			// Stop the dead pipeline cleanly before restarting
-			if stopErr := i.pipeline.Stop(); stopErr != nil {
-				log.Printf("Pipeline stop error: %s", stopErr)
+			// Block until pipeline error OR stall detected
+			select {
+			case pipelineErr := <-i.pipeline.ErrorChan():
+				log.Printf("Pipeline error: %s", pipelineErr)
+			case <-stallCh:
+				// Stall detector already logged
 			}
+
+			// Signal stall detector to stop (no-op if it already closed stallCh)
+			select {
+			case <-stallCh:
+				// Already closed
+			default:
+				close(stallCh)
+			}
+			<-stallDone
+
+			// Stop the dead pipeline with timeout to prevent hanging forever.
+			// pipeline.Stop() can block indefinitely if the underlying connection
+			// is in a broken state (the root cause of the zombie bug).
+			stopDone := make(chan struct{})
+			go func() {
+				if stopErr := i.pipeline.Stop(); stopErr != nil {
+					log.Printf("Pipeline stop error: %s", stopErr)
+				}
+				close(stopDone)
+			}()
+			select {
+			case <-stopDone:
+				// Clean shutdown
+			case <-time.After(5 * time.Second):
+				n := atomic.AddInt64(&abandonedPipelines, 1)
+				log.Printf("Pipeline stop timed out, abandoning old pipeline (leaked: %d)", n)
+			}
+
 			break // break inner host loop, restart from outer loop
 		}
 
@@ -672,6 +738,9 @@ func (i *Indexer) startAdderPipeline() error {
 
 // handleEvent processes a block event from the adder pipeline (live tail).
 func (i *Indexer) handleEvent(evt event.Event) error {
+	// Update liveness tracker for stall detection
+	atomic.StoreInt64(&i.lastBlockTime, time.Now().Unix())
+
 	// Extract VRF output before JSON marshal (Block field is json:"-")
 	var vrfOutput []byte
 	if i.leaderlogEnabled {
