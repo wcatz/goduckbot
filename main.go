@@ -60,7 +60,8 @@ const (
 
 // Channel to broadcast block events to connected clients
 var clients = make(map[*websocket.Conn]bool) // connected clients
-var broadcast = make(chan interface{}, 100)    // broadcast channel (buffered to prevent deadlock)
+var clientsMutex sync.RWMutex                 // protects clients map
+var broadcast = make(chan interface{}, 100)   // broadcast channel (buffered to prevent deadlock)
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -961,19 +962,29 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// Upgrade initial GET request to a websocket
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("WebSocket upgrade failed: %v", err)
+		return
 	}
 	// Make sure we close the connection when the function returns
 	defer ws.Close()
+
 	// Register our new client
+	clientsMutex.Lock()
 	clients[ws] = true
+	clientsMutex.Unlock()
+
+	defer func() {
+		clientsMutex.Lock()
+		delete(clients, ws)
+		clientsMutex.Unlock()
+	}()
+
 	for {
 		var msg interface{}
 		// Read in a new message as JSON and map it to a Message object
 		err := ws.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("error: %v", err)
-			delete(clients, ws)
+			log.Printf("WebSocket read error: %v", err)
 			break
 		}
 		// Send the newly received message to the broadcast channel
@@ -987,14 +998,21 @@ func handleMessages() {
 		// Grab the next message from the broadcast channel
 		msg := <-broadcast
 		// Send it out to every client that is currently connected
+		clientsMutex.RLock()
 		for client := range clients {
 			err := client.WriteJSON(msg)
 			if err != nil {
-				log.Printf("error: %v", err)
+				log.Printf("WebSocket write error: %v", err)
 				client.Close()
+				// Remove failed client (need write lock)
+				clientsMutex.RUnlock()
+				clientsMutex.Lock()
 				delete(clients, client)
+				clientsMutex.Unlock()
+				clientsMutex.RLock()
 			}
 		}
+		clientsMutex.RUnlock()
 	}
 }
 
