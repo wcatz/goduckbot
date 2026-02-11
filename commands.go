@@ -443,9 +443,9 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			}
 		}
 
-		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(targetEpoch)
+		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(targetEpoch - 1)
 		if nonceErr != nil {
-			replyEpoch(fmt.Sprintf("Failed to get nonce for epoch %d: %v", targetEpoch, nonceErr))
+			replyEpoch(fmt.Sprintf("Failed to get nonce for epoch %d (using epoch %d nonce): %v", targetEpoch, targetEpoch-1, nonceErr))
 			return
 		}
 
@@ -553,9 +553,9 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		}
 	}
 
-	epochNonce, err := i.nonceTracker.GetNonceForEpoch(targetEpoch)
+	epochNonce, err := i.nonceTracker.GetNonceForEpoch(targetEpoch - 1)
 	if err != nil {
-		reply(fmt.Sprintf("Failed to get nonce for epoch %d: %v", targetEpoch, err))
+		reply(fmt.Sprintf("Failed to get nonce for epoch %d (using epoch %d nonce): %v", targetEpoch, targetEpoch-1, err))
 		return
 	}
 
@@ -937,9 +937,9 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 
-		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(currentEpoch)
+		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(currentEpoch - 1)
 		if nonceErr != nil {
-			reply(fmt.Sprintf("Failed to get nonce: %v", nonceErr))
+			reply(fmt.Sprintf("Failed to get nonce for epoch %d (using epoch %d nonce): %v", currentEpoch, currentEpoch-1, nonceErr))
 			return
 		}
 
