@@ -18,6 +18,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 // Shelley intersect points: last Byron block per network.
@@ -84,11 +85,18 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	)
 
 	// Connect to node via NtN (required for TCP connections)
+	// Increase keepalive tolerance: default 60s period / 10s timeout is too aggressive
+	// when the node is busy validating blocks, causing spurious disconnects.
+	keepaliveCfg := keepalive.NewConfig(
+		keepalive.WithPeriod(120*time.Second),
+		keepalive.WithTimeout(30*time.Second),
+	)
 	errChan := make(chan error, 1)
 	conn, connErr := ouroboros.NewConnection(
 		ouroboros.WithNetworkMagic(uint32(s.networkMagic)),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(keepaliveCfg),
 		ouroboros.WithChainSyncConfig(chainSyncCfg),
 		ouroboros.WithErrorChan(errChan),
 	)

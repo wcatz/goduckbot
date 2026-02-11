@@ -561,6 +561,19 @@ func (i *Indexer) runChainTail() error {
 				}
 				log.Printf("Historical sync error (attempt %d/%d): %s", attempt, maxRetries, err)
 				if attempt < maxRetries {
+					// Drain channel buffer — old syncer is dead so no new sends.
+					// Wait for writer goroutine to flush all buffered blocks to DB.
+					for len(blockCh) > 0 {
+						time.Sleep(100 * time.Millisecond)
+					}
+					// Give writer time to finish flushing the current in-flight batch
+					time.Sleep(3 * time.Second)
+
+					// Resync NonceTracker from DB so in-memory state matches persisted state.
+					// Without this, the evolving nonce diverges when buffered blocks from
+					// the dead connection overlap with blocks from the new connection.
+					i.nonceTracker.ResyncFromDB()
+
 					time.Sleep(time.Duration(attempt) * 5 * time.Second)
 					continue
 				}

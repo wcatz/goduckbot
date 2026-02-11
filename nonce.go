@@ -215,6 +215,37 @@ func (nt *NonceTracker) ProcessBatch(blocks []BlockData) {
 	}
 }
 
+// ResyncFromDB reloads the NonceTracker's in-memory state from the database.
+// Called between historical sync retry attempts to ensure the evolving nonce
+// matches what was actually persisted, preventing corruption when buffered
+// blocks from a dead connection overlap with blocks from the new connection.
+func (nt *NonceTracker) ResyncFromDB() {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	lastSlot, err := nt.store.GetLastSyncedSlot(ctx)
+	if err != nil || lastSlot == 0 {
+		log.Printf("ResyncFromDB: no synced data, keeping current state")
+		return
+	}
+
+	epoch := SlotToEpoch(lastSlot, nt.networkMagic)
+	nonce, blockCount, err := nt.store.GetEvolvingNonce(ctx, epoch)
+	if err != nil || nonce == nil {
+		log.Printf("ResyncFromDB: no evolving nonce for epoch %d, keeping current state", epoch)
+		return
+	}
+
+	nt.evolvingNonce = nonce
+	nt.currentEpoch = epoch
+	nt.blockCount = blockCount
+	nt.candidateFroze = false
+	log.Printf("ResyncFromDB: restored epoch %d, block count %d", epoch, blockCount)
+}
+
 // FreezeCandidate freezes the candidate nonce at the stability window.
 func (nt *NonceTracker) FreezeCandidate(epoch int) {
 	nt.mu.Lock()
