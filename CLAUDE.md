@@ -91,7 +91,7 @@ Is leader     = leaderValue < threshold
 ```
 
 ### Nonce Evolution
-Per block: `nonceValue = BLAKE2b-256(0x4E || vrfOutput)`, then `eta_v = eta_v XOR nonceValue` (Cardano Nonce semigroup: `Nonce a <> Nonce b = Nonce (xor a b)`). Rolling eta_v accumulates across epoch boundaries (no reset). Candidate nonce (`η_c`) freezes at 60% epoch progress (stability window = 259,200 slots on mainnet). At each epoch boundary, the TICKN rule computes: `epochNonce = η_c XOR η_ph` where `η_ph` is the block hash from the last block of the prior epoch. Koios used as fallback in lite mode when local nonce unavailable.
+Per block: `vrfNonceValue = BLAKE2b-256(vrfOutput)`, then `eta_v = BLAKE2b-256(eta_v || vrfNonceValue)` (Cardano Nonce semigroup: BLAKE2b-256 concatenation, NOT XOR). Rolling eta_v accumulates across epoch boundaries (no reset). Candidate nonce (`η_c`) freezes at 60% epoch progress (stability window = 259,200 slots on mainnet). At each epoch boundary, the TICKN rule computes: `epochNonce = BLAKE2b-256(η_c || η_ph)` where `η_ph` is the block hash from the last block of the prior epoch. Koios used as fallback in lite mode when local nonce unavailable.
 
 **Batch processing:** `ProcessBatch()` method in `nonce.go` performs in-memory nonce evolution for batches of blocks (used during historical sync), then persists the final nonce state in a single DB transaction. This dramatically improves sync performance vs per-block DB writes.
 
@@ -375,15 +375,114 @@ InsertBlock(ctx, ...) (bool, error)  // returns (inserted bool, err)
 - **Pod**: `goduckbot` on `k3s-control-1`
 - **Node address**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:3001`
 - **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000` (same-node socat, no WireGuard)
-- **DB**: PostgreSQL on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
-- **Mode**: full, leaderlog enabled, telegram enabled, twitter disabled
-- **Image**: `wcatz/goduckbot:2.5.0` (pullPolicy: Always)
-- **Chart**: 0.7.15
+- **DB**: PostgreSQL `goduckbot_v2` on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
+- **Mode**: full, leaderlog enabled, telegram enabled, twitter enabled
+- **Image**: `wcatz/goduckbot:2.7.9`
+- **Chart**: 0.7.16
 - **Duck media**: gif
-- **Test instance**: `goduckbot-test` on `k3s-mr-slave` (latest image)
+- **Test instance**: `goduckbot-test` shut down, database wiped
 
 ### Full Sync Performance (clean run)
 
 - **Total blocks:** ~8.5M (Shelley epoch 208 → current epoch 611)
 - **At ~3,300 blocks/sec** (with CopyFrom batch writes): ~43 minutes
 - **Database size:** ~2 GB (blocks table: ~235 bytes/row × 8.5M rows)
+
+---
+
+## v2.7.8 Critical Fixes (2026-02-11)
+
+Comprehensive bug fix release addressing goroutine leaks, query performance, and race conditions.
+
+### NtC Connection Leak Fix (localquery.go)
+
+**Problem:** `withQuery()` returned on context timeout but goroutine remained blocked in `GetStakeSnapshots()`, leaking both goroutines and TCP connections.
+
+**Solution:** Added connection cleanup on context expiration:
+```go
+select {
+case <-ctx.Done():
+    if conn != nil {
+        conn.Close()  // Unblock goroutine
+    }
+    <-connClosed  // Wait for cleanup
+    return ctx.Err()
+case r := <-ch:
+    return r.err
+}
+```
+
+### GetStakeSnapshots CBOR Encoding Fix (localquery.go)
+
+**Problem:** `PoolId [28]byte` encoded as CBOR array, causing cardano-node to ignore filter and return all ~3000 pools (2+ minute query).
+
+**Solution:** Wrap with `Blake2b224` type which has proper `MarshalCBOR()`:
+```go
+poolHash := ledger.Blake2b224(poolId)  // Encodes as CBOR bytestring
+result, qErr := client.GetStakeSnapshots([]any{poolHash})
+```
+
+### WebSocket Data Race Fix (main.go)
+
+**Problem:** Concurrent map access from HTTP handlers and `handleMessages` goroutine without synchronization.
+
+**Solution:** Added `clientsMutex sync.RWMutex` protecting all `clients` map operations.
+
+### Log.Fatal Crash Fix (main.go)
+
+**Problem:** Single bad WebSocket connection killed entire bot process.
+
+**Solution:** Changed `log.Fatal(err)` to `log.Printf` + return in WebSocket upgrade handler.
+
+### Keepalive Tuning (sync.go)
+
+Increased NtN keepalive from 60s/10s to 120s/30s to reduce reconnection frequency during heavy sync.
+
+### ResyncFromDB Between Retries (main.go)
+
+Added `ResyncFromDB()` call between retry attempts to prevent nonce corruption when historical sync reconnects mid-epoch.
+
+### Deployment Status
+
+- **Image:** `wcatz/goduckbot:2.7.8`
+- **Helm Chart:** `0.7.16`
+- **Nonce Computation:** Verified correct (matches Koios API for all tested epochs)
+- **Historical Sync:** Completed successfully from Shelley genesis
+- **Live Tailing:** Working at tip (epoch 612+)
+- **Known Issue:** NtC stake queries still timeout (Koios fallback working)
+
+---
+
+## v2.7.9 Critical Fix (2026-02-11)
+
+### Epoch Nonce Off-By-One Bug
+
+**Problem:** Leaderlog predictions were 0% accurate because the code was fetching the WRONG epoch nonce.
+- For epoch N leaderlog, code was fetching `GetNonceForEpoch(N)`
+- Should fetch `GetNonceForEpoch(N-1)` because epoch_nonces table stores nonces BY THE EPOCH THEY'RE COMPUTED IN
+- User discovered this: "you calculate +1? lol forget to account for table )?"
+
+**Root Cause:** Table semantics mismatch
+- `epoch_nonces` table: stores final_nonce in the row for the epoch it was COMPUTED during
+- For epoch 612 leaderlog: need final_nonce from epoch 611 row
+- For epoch 613 leaderlog: need final_nonce from epoch 612 row
+
+**Solution:** Changed all 4 locations to fetch epoch-1 nonce
+- commands.go line 446: /leaderlog command
+- commands.go line 556: menu handler
+- commands.go line 940: /nextblock command
+- main.go line 1308: automatic leaderlog trigger
+
+**Verification:**
+- cncli leaderlog comparison showed 100% match (21 slots identical) for epoch 612
+- However, actual on-chain blocks for epoch 612: 8 blocks at different slots (0% overlap with predictions)
+- This confirmed the nonce was wrong
+- Fix deployed with fresh `goduckbot_v2` database
+
+**Deployment Status:**
+- **Image:** `wcatz/goduckbot:2.7.9`
+- **Database:** Fresh `goduckbot_v2` (bypassed CNPG PITR restoration issues)
+- **Sync:** Completed from Shelley epoch 208 to tip (epoch 612) in ~37 minutes
+- **Nonce Evolution:** All nonces recomputed correctly with fix
+- **Next Verification:** Epoch 613 predictions vs actual blocks will prove the fix works
+- **Known Issue:** NtC stake queries still failing after 6 seconds (Koios fallback in use)

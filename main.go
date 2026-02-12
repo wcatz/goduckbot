@@ -1305,9 +1305,10 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 	defer cancel()
 
 	// Get epoch nonce (local first, Koios fallback)
-	epochNonce, err := i.nonceTracker.GetNonceForEpoch(epoch)
+	// For epoch N leaderlog, use the nonce computed during epoch N-1
+	epochNonce, err := i.nonceTracker.GetNonceForEpoch(epoch - 1)
 	if err != nil {
-		log.Printf("Failed to get nonce for epoch %d: %v", epoch, err)
+		log.Printf("Failed to get nonce for epoch %d (tried epoch %d nonce): %v", epoch, epoch-1, err)
 		return false
 	}
 
