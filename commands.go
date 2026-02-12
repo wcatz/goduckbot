@@ -226,6 +226,14 @@ func (i *Indexer) requireNodeQuery(m *telebot.Message) bool {
 	return true
 }
 
+func (i *Indexer) requireSynced(m *telebot.Message) bool {
+	if !i.isSynced() {
+		i.bot.Send(m.Chat, "\u23F3 Historical sync in progress. Commands available after sync completes.")
+		return false
+	}
+	return true
+}
+
 func (i *Indexer) cmdHelp(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
 		return
@@ -383,6 +391,9 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 
 func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	if !i.isAllowed(m) {
+		return
+	}
+	if !i.requireSynced(m) {
 		return
 	}
 
@@ -608,6 +619,9 @@ func (i *Indexer) cmdNonce(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
 		return
 	}
+	if !i.requireSynced(m) {
+		return
+	}
 
 	if i.nonceTracker == nil {
 		i.bot.Send(m.Chat, "Nonce tracking not enabled")
@@ -650,6 +664,9 @@ func (i *Indexer) cmdNonce(m *telebot.Message) {
 
 func (i *Indexer) cmdValidate(m *telebot.Message) {
 	if !i.isAllowed(m) {
+		return
+	}
+	if !i.requireSynced(m) {
 		return
 	}
 
@@ -908,6 +925,9 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 
 func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 	if !i.isAllowed(m) {
+		return
+	}
+	if !i.requireSynced(m) {
 		return
 	}
 
