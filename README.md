@@ -10,7 +10,7 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 
 **Leader Schedule** — Pure Go CPRAOS implementation checking every slot per epoch against your VRF key. Calculates next epoch schedule automatically at the stability window (60% into epoch). On-demand via `/leaderlog`.
 
-**Epoch Nonces** — In full mode, streams every block from Shelley genesis extracting VRF outputs per era, evolving the nonce via XOR (Cardano Nonce semigroup), and freezing at the stability window. Backfills ~400 epochs in under 2 minutes.
+**Epoch Nonces** — In full mode, streams every block from Shelley genesis extracting VRF outputs per era, evolving the nonce via BLAKE2b-256 concatenation, and freezing at the stability window. Backfills ~400 epochs in under 2 minutes.
 
 **Stake Queries** — Direct NtC local state query to your cardano-node for mark/set/go stake snapshots. Falls back to Koios if NtC is unavailable.
 
@@ -233,10 +233,10 @@ The epoch nonce is a 32-byte hash serving as randomness for VRF leader election.
 
 **In full mode**, duckBot self-computes nonces by streaming every block from Shelley genesis:
 
-1. Per block: extract VRF output from header, compute `nonceValue = BLAKE2b-256("N" || vrfOutput)`
-2. Evolve: `eta_v = eta_v XOR nonceValue` — Cardano Nonce semigroup (`Nonce a <> Nonce b = Nonce (xor a b)`)
+1. Per block: extract VRF output from header, compute `vrfNonceValue = BLAKE2b-256(vrfOutput)` (no prefix)
+2. Evolve: `eta_v = BLAKE2b-256(eta_v || vrfNonceValue)` — concatenate and hash, NOT XOR
 3. At stability window (60% epoch progress): freeze candidate nonce (`η_c`)
-4. Epoch transition (TICKN rule): `epochNonce = η_c XOR η_ph` where `η_ph` is the last block hash from the prior epoch boundary
+4. Epoch transition (TICKN rule): `epochNonce = BLAKE2b-256(η_c || η_ph)` where `η_ph` is the last block hash from the prior epoch boundary
 
 **In lite mode**, nonces are fetched from the Koios API.
 
