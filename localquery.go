@@ -71,6 +71,7 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 	var conn *ouroboros.Connection
 
 	go func() {
+		defer close(connClosed)
 		var err error
 		conn, err = ouroboros.NewConnection(
 			ouroboros.WithNetworkMagic(c.networkMagic),
@@ -86,10 +87,7 @@ func (c *NodeQueryClient) withQuery(ctx context.Context, fn func(*localstatequer
 			ch <- result{fmt.Errorf("creating connection: %w", err)}
 			return
 		}
-		defer func() {
-			conn.Close()
-			close(connClosed)
-		}()
+		defer conn.Close()
 
 		network, address := parseNodeAddress(c.nodeAddress)
 		if err := conn.Dial(network, address); err != nil {
