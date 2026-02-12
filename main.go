@@ -122,6 +122,12 @@ type Indexer struct {
 	scheduleExists      map[int]bool      // cached: epoch -> schedule already in DB
 	syncer              *ChainSyncer      // nil in lite mode
 	lastBlockTime       int64             // atomic: unix timestamp of last block received
+	historicalSyncDone  int32             // atomic: 0 = syncing, 1 = done (lite mode starts at 1)
+}
+
+// isSynced returns true when historical sync is complete (or in lite mode).
+func (i *Indexer) isSynced() bool {
+	return atomic.LoadInt32(&i.historicalSyncDone) == 1
 }
 
 type BlockEvent struct {
@@ -244,6 +250,11 @@ func (i *Indexer) Start() error {
 		i.mode = "lite"
 	}
 	log.Printf("Running in %s mode", i.mode)
+
+	// Lite mode is always "synced" — no historical sync needed
+	if i.mode != "full" {
+		atomic.StoreInt32(&i.historicalSyncDone, 1)
+	}
 
 	// Social network toggles
 	i.telegramEnabled = viper.GetBool("telegram.enabled")
@@ -585,6 +596,7 @@ func (i *Indexer) runChainTail() error {
 
 		close(blockCh)
 		<-writerDone // wait for DB writer to flush
+		atomic.StoreInt32(&i.historicalSyncDone, 1)
 		log.Println("Historical sync complete, transitioning to live tail...")
 
 		// Run nonce backfill after sync so blocks table has data
@@ -1240,6 +1252,10 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	}
 
 	// Calculate leader schedule for next epoch after stability window
+	// Skip during historical sync — nonces aren't available yet
+	if !i.isSynced() {
+		return
+	}
 	nextEpoch := i.epoch + 1
 	if pastStability {
 		i.leaderlogMu.Lock()
