@@ -60,8 +60,8 @@ const (
 
 // Channel to broadcast block events to connected clients
 var clients = make(map[*websocket.Conn]bool) // connected clients
-var clientsMutex sync.RWMutex                 // protects clients map
-var broadcast = make(chan interface{}, 100)   // broadcast channel (buffered to prevent deadlock)
+var clientsMutex sync.RWMutex                // protects clients map
+var broadcast = make(chan interface{}, 100)  // broadcast channel (buffered to prevent deadlock)
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -114,14 +114,14 @@ type Indexer struct {
 	leaderlogEnabled    bool
 	leaderlogTZ         string
 	leaderlogTimeFormat string
-	store            Store
-	nonceTracker     *NonceTracker
-	leaderlogMu      sync.Mutex
-	leaderlogCalcing map[int]bool      // epochs currently being calculated
-	leaderlogFailed  map[int]time.Time // cooldown: epoch -> last failure time
-	scheduleExists   map[int]bool      // cached: epoch -> schedule already in DB
-	syncer           *ChainSyncer // nil in lite mode
-	lastBlockTime    int64        // atomic: unix timestamp of last block received
+	store               Store
+	nonceTracker        *NonceTracker
+	leaderlogMu         sync.Mutex
+	leaderlogCalcing    map[int]bool      // epochs currently being calculated
+	leaderlogFailed     map[int]time.Time // cooldown: epoch -> last failure time
+	scheduleExists      map[int]bool      // cached: epoch -> schedule already in DB
+	syncer              *ChainSyncer      // nil in lite mode
+	lastBlockTime       int64             // atomic: unix timestamp of last block received
 }
 
 type BlockEvent struct {
@@ -1256,7 +1256,7 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		existing, err := i.store.GetLeaderSchedule(ctx, nextEpoch)
 		cancel()
-		if err == nil && existing != nil {
+		if err == nil && existing != nil && i.scheduleNonceMatches(ctx, existing) {
 			i.scheduleExists[nextEpoch] = true
 			i.leaderlogMu.Unlock()
 			return
@@ -1306,7 +1306,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 
 	// Get epoch nonce (local first, Koios fallback)
 	// For epoch N leaderlog, use the nonce computed during epoch N-1
-	epochNonce, err := i.nonceTracker.GetNonceForEpoch(epoch - 1)
+	epochNonce, err := i.nonceTracker.GetVerifiedNonceForEpoch(epoch - 1)
 	if err != nil {
 		log.Printf("Failed to get nonce for epoch %d (tried epoch %d nonce): %v", epoch, epoch-1, err)
 		return false
@@ -1445,15 +1445,15 @@ func (i *Indexer) backfillSchedules(ctx context.Context) error {
 	failed := 0
 
 	for epoch := shelleyStart + 1; epoch <= i.epoch; epoch++ {
-		// Check if schedule already exists
+		// Check if schedule already exists and matches expected nonce
 		existing, _ := i.store.GetLeaderSchedule(ctx, epoch)
-		if existing != nil {
+		if existing != nil && i.scheduleNonceMatches(ctx, existing) {
 			skipped++
 			continue
 		}
 
-		// Get nonce from DB
-		nonce, err := i.store.GetFinalNonce(ctx, epoch)
+		// Get nonce from DB (epoch N schedule uses nonce from epoch N-1)
+		nonce, err := i.store.GetFinalNonce(ctx, epoch-1)
 		if err != nil || nonce == nil {
 			continue // no nonce available for this epoch
 		}
