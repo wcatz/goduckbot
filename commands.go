@@ -427,7 +427,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 
 		// Check DB first
 		stored, storeErr := i.store.GetLeaderSchedule(ctx, targetEpoch)
-		if storeErr == nil && stored != nil && i.scheduleNonceMatches(ctx, stored) {
+		if storeErr == nil && stored != nil {
 			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 			i.bot.Send(m.Chat, msg)
 			return
@@ -443,7 +443,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			}
 		}
 
-		epochNonce, nonceErr := i.nonceTracker.GetVerifiedNonceForEpoch(targetEpoch - 1)
+		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(targetEpoch - 1)
 		if nonceErr != nil {
 			replyEpoch(fmt.Sprintf("Failed to get nonce for epoch %d (using epoch %d nonce): %v", targetEpoch, targetEpoch-1, nonceErr))
 			return
@@ -533,7 +533,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 
 	// Check for stored schedule first
 	stored, err := i.store.GetLeaderSchedule(ctx, targetEpoch)
-	if err == nil && stored != nil && i.scheduleNonceMatches(ctx, stored) {
+	if err == nil && stored != nil {
 		msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
 		i.bot.Send(m.Chat, msg)
 		return
@@ -553,7 +553,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		}
 	}
 
-	epochNonce, err := i.nonceTracker.GetVerifiedNonceForEpoch(targetEpoch - 1)
+	epochNonce, err := i.nonceTracker.GetNonceForEpoch(targetEpoch - 1)
 	if err != nil {
 		reply(fmt.Sprintf("Failed to get nonce for epoch %d (using epoch %d nonce): %v", targetEpoch, targetEpoch-1, err))
 		return
@@ -634,7 +634,7 @@ func (i *Indexer) cmdNonce(m *telebot.Message) {
 		label = "next"
 	}
 
-	nonce, err := i.nonceTracker.GetVerifiedNonceForEpoch(epoch)
+	nonce, err := i.nonceTracker.GetNonceForEpoch(epoch)
 	if err != nil {
 		i.bot.Send(m.Chat, fmt.Sprintf("Error getting %s epoch nonce: %v", label, err))
 		return
@@ -921,9 +921,6 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 	// Try DB first with short timeout
 	ctxShort, cancelShort := context.WithTimeout(context.Background(), 10*time.Second)
 	schedule, err := i.store.GetLeaderSchedule(ctxShort, currentEpoch)
-	if err == nil && schedule != nil && !i.scheduleNonceMatches(ctxShort, schedule) {
-		schedule = nil
-	}
 	cancelShort()
 
 	// If no schedule, auto-compute it
@@ -940,7 +937,7 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 
-		epochNonce, nonceErr := i.nonceTracker.GetVerifiedNonceForEpoch(currentEpoch - 1)
+		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(currentEpoch - 1)
 		if nonceErr != nil {
 			reply(fmt.Sprintf("Failed to get nonce for epoch %d (using epoch %d nonce): %v", currentEpoch, currentEpoch-1, nonceErr))
 			return
@@ -1067,24 +1064,6 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 	i.bot.Send(m.Chat, msg)
 }
 
-// scheduleNonceMatches validates that a cached schedule was built with the
-// currently expected nonce for that epoch (epoch-1 final nonce).
-func (i *Indexer) scheduleNonceMatches(ctx context.Context, schedule *LeaderSchedule) bool {
-	if schedule == nil {
-		return false
-	}
-	expected, err := i.nonceTracker.GetVerifiedNonceForEpoch(schedule.Epoch - 1)
-	if err != nil {
-		log.Printf("Failed to load expected nonce for epoch %d: %v", schedule.Epoch, err)
-		return false
-	}
-	if schedule.EpochNonce == hex.EncodeToString(expected) {
-		return true
-	}
-	log.Printf("Ignoring stale schedule for epoch %d: cached nonce %s != expected %s",
-		schedule.Epoch, schedule.EpochNonce, hex.EncodeToString(expected))
-	return false
-}
 
 func (i *Indexer) cmdVersion(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {

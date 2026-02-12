@@ -1256,7 +1256,7 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		existing, err := i.store.GetLeaderSchedule(ctx, nextEpoch)
 		cancel()
-		if err == nil && existing != nil && i.scheduleNonceMatches(ctx, existing) {
+		if err == nil && existing != nil {
 			i.scheduleExists[nextEpoch] = true
 			i.leaderlogMu.Unlock()
 			return
@@ -1306,7 +1306,7 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 
 	// Get epoch nonce (local first, Koios fallback)
 	// For epoch N leaderlog, use the nonce computed during epoch N-1
-	epochNonce, err := i.nonceTracker.GetVerifiedNonceForEpoch(epoch - 1)
+	epochNonce, err := i.nonceTracker.GetNonceForEpoch(epoch - 1)
 	if err != nil {
 		log.Printf("Failed to get nonce for epoch %d (tried epoch %d nonce): %v", epoch, epoch-1, err)
 		return false
@@ -1445,9 +1445,9 @@ func (i *Indexer) backfillSchedules(ctx context.Context) error {
 	failed := 0
 
 	for epoch := shelleyStart + 1; epoch <= i.epoch; epoch++ {
-		// Check if schedule already exists and matches expected nonce
+		// Check if schedule already exists
 		existing, _ := i.store.GetLeaderSchedule(ctx, epoch)
-		if existing != nil && i.scheduleNonceMatches(ctx, existing) {
+		if existing != nil {
 			skipped++
 			continue
 		}
