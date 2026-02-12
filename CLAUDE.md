@@ -375,12 +375,12 @@ InsertBlock(ctx, ...) (bool, error)  // returns (inserted bool, err)
 - **Pod**: `goduckbot` on `k3s-control-1`
 - **Node address**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:3001`
 - **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000` (same-node socat, no WireGuard)
-- **DB**: PostgreSQL on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
-- **Mode**: full, leaderlog enabled, telegram enabled, twitter disabled
-- **Image**: `wcatz/goduckbot:2.5.0` (pullPolicy: Always)
-- **Chart**: 0.7.15
+- **DB**: PostgreSQL `goduckbot_v2` on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
+- **Mode**: full, leaderlog enabled, telegram enabled, twitter enabled
+- **Image**: `wcatz/goduckbot:2.7.9`
+- **Chart**: 0.7.16
 - **Duck media**: gif
-- **Test instance**: `goduckbot-test` on `k3s-mr-slave` (latest image)
+- **Test instance**: `goduckbot-test` shut down, database wiped
 
 ### Full Sync Performance (clean run)
 
@@ -450,3 +450,39 @@ Added `ResyncFromDB()` call between retry attempts to prevent nonce corruption w
 - **Historical Sync:** Completed successfully from Shelley genesis
 - **Live Tailing:** Working at tip (epoch 612+)
 - **Known Issue:** NtC stake queries still timeout (Koios fallback working)
+
+---
+
+## v2.7.9 Critical Fix (2026-02-11)
+
+### Epoch Nonce Off-By-One Bug
+
+**Problem:** Leaderlog predictions were 0% accurate because the code was fetching the WRONG epoch nonce.
+- For epoch N leaderlog, code was fetching `GetNonceForEpoch(N)`
+- Should fetch `GetNonceForEpoch(N-1)` because epoch_nonces table stores nonces BY THE EPOCH THEY'RE COMPUTED IN
+- User discovered this: "you calculate +1? lol forget to account for table )?"
+
+**Root Cause:** Table semantics mismatch
+- `epoch_nonces` table: stores final_nonce in the row for the epoch it was COMPUTED during
+- For epoch 612 leaderlog: need final_nonce from epoch 611 row
+- For epoch 613 leaderlog: need final_nonce from epoch 612 row
+
+**Solution:** Changed all 4 locations to fetch epoch-1 nonce
+- commands.go line 446: /leaderlog command
+- commands.go line 556: menu handler
+- commands.go line 940: /nextblock command
+- main.go line 1308: automatic leaderlog trigger
+
+**Verification:**
+- cncli leaderlog comparison showed 100% match (21 slots identical) for epoch 612
+- However, actual on-chain blocks for epoch 612: 8 blocks at different slots (0% overlap with predictions)
+- This confirmed the nonce was wrong
+- Fix deployed with fresh `goduckbot_v2` database
+
+**Deployment Status:**
+- **Image:** `wcatz/goduckbot:2.7.9`
+- **Database:** Fresh `goduckbot_v2` (bypassed CNPG PITR restoration issues)
+- **Sync:** Completed from Shelley epoch 208 to tip (epoch 612) in ~37 minutes
+- **Nonce Evolution:** All nonces recomputed correctly with fix
+- **Next Verification:** Epoch 613 predictions vs actual blocks will prove the fix works
+- **Known Issue:** NtC stake queries still failing after 6 seconds (Koios fallback in use)
