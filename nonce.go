@@ -316,6 +316,45 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	return nonce, nil
 }
 
+// GetVerifiedNonceForEpoch returns a nonce that is verified against canonical
+// data for that epoch, repairing stale DB cache entries if needed.
+//
+// Full mode: always recompute from local chain data and upsert DB cache.
+// Lite mode: use existing lookup priority (DB -> Koios).
+func (nt *NonceTracker) GetVerifiedNonceForEpoch(epoch int) ([]byte, error) {
+	if !nt.fullMode {
+		return nt.GetNonceForEpoch(epoch)
+	}
+
+	computeCtx, computeCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer computeCancel()
+	computed, err := nt.ComputeEpochNonce(computeCtx, epoch)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify nonce for epoch %d: %w", epoch, err)
+	}
+
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer checkCancel()
+	cached, cacheErr := nt.store.GetFinalNonce(checkCtx, epoch)
+	if cacheErr == nil && cached != nil && bytes.Equal(cached, computed) {
+		return cached, nil
+	}
+
+	source := "computed-verified"
+	if cacheErr == nil && cached != nil && !bytes.Equal(cached, computed) {
+		log.Printf("Correcting stale cached nonce for epoch %d: cached %x != computed %x", epoch, cached, computed)
+		source = "computed-correction"
+	}
+
+	storeCtx, storeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer storeCancel()
+	if err := nt.store.SetFinalNonce(storeCtx, epoch, computed, source); err != nil {
+		log.Printf("Failed to persist verified nonce for epoch %d: %v", epoch, err)
+	}
+
+	return computed, nil
+}
+
 // ComputeEpochNonce computes the epoch nonce for targetEpoch entirely from local chain data.
 // Streams all blocks from Shelley genesis, evolving the nonce and freezing at the
 // stability window of each epoch, then computing:
@@ -600,26 +639,26 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 
 // IntegrityResult holds the verification result for a single epoch.
 type IntegrityResult struct {
-	Epoch     int
-	Computed  string // hex
-	DBStored  string // hex, or "n/a"
-	Koios     string // hex, or "n/a"
-	DBMatch   bool
+	Epoch      int
+	Computed   string // hex
+	DBStored   string // hex, or "n/a"
+	Koios      string // hex, or "n/a"
+	DBMatch    bool
 	KoiosMatch bool
 }
 
 // IntegrityReport is the summary of a full nonce integrity check.
 type IntegrityReport struct {
-	TotalEpochs    int
-	KoiosMatched   int
+	TotalEpochs     int
+	KoiosMatched    int
 	KoiosMismatched int
-	KoiosUnavail   int
-	DBMatched      int
-	DBMismatched   int
-	VrfErrors      int
-	TotalBlocks    int
-	Duration       time.Duration
-	FirstMismatch  int // epoch of first Koios mismatch, 0 if none
+	KoiosUnavail    int
+	DBMatched       int
+	DBMismatched    int
+	VrfErrors       int
+	TotalBlocks     int
+	Duration        time.Duration
+	FirstMismatch   int // epoch of first Koios mismatch, 0 if none
 }
 
 // NonceIntegrityCheck recomputes all epoch nonces from raw VRF outputs and
