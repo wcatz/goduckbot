@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -524,12 +525,21 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 				time.Sleep(50 * time.Millisecond) // rate limit
 			}
 
-			// Cache if not already present
+			// Cache if not already present, or update if mismatched
 			existing, _ := nt.store.GetFinalNonce(ctx, epoch)
 			if existing == nil {
 				if storeErr := nt.store.SetFinalNonce(ctx, epoch, eta0, "backfill"); storeErr != nil {
 					log.Printf("Failed to cache nonce for epoch %d: %v", epoch, storeErr)
 				} else {
+					cached++
+					lastCachedEpoch = epoch
+				}
+			} else if !bytes.Equal(existing, eta0) {
+				// Existing nonce is wrong, update it
+				if storeErr := nt.store.SetFinalNonce(ctx, epoch, eta0, "backfill-correction"); storeErr != nil {
+					log.Printf("Failed to correct nonce for epoch %d: %v", epoch, storeErr)
+				} else {
+					log.Printf("Corrected nonce for epoch %d", epoch)
 					cached++
 					lastCachedEpoch = epoch
 				}
