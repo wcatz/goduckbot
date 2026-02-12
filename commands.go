@@ -921,10 +921,10 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 	// Try DB first with short timeout
 	ctxShort, cancelShort := context.WithTimeout(context.Background(), 10*time.Second)
 	schedule, err := i.store.GetLeaderSchedule(ctxShort, currentEpoch)
-	cancelShort()
 	if err == nil && schedule != nil && !i.scheduleNonceMatches(ctxShort, schedule) {
 		schedule = nil
 	}
+	cancelShort()
 
 	// If no schedule, auto-compute it
 	if err != nil || schedule == nil {
