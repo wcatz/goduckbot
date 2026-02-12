@@ -283,26 +283,34 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 		return nonce, nil
 	}
 
-	// Full mode: compute from chain data (no external dependencies)
+	// Full mode: compute from chain data if sync is complete through the target epoch.
+	// If sync hasn't reached the target epoch, fall through to Koios to avoid
+	// computing garbage nonces from incomplete chain data.
 	if nt.fullMode {
-		log.Printf("Computing epoch %d nonce from chain data...", epoch)
-		computeCtx, computeCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer computeCancel()
-		nonce, err = nt.ComputeEpochNonce(computeCtx, epoch)
-		if err != nil {
-			return nil, fmt.Errorf("failed to compute nonce for epoch %d: %w", epoch, err)
+		lastSlot, slotErr := nt.store.GetLastSyncedSlot(ctx)
+		targetEpochEndSlot := GetEpochStartSlot(epoch+1, nt.networkMagic)
+		if slotErr == nil && lastSlot >= targetEpochEndSlot {
+			log.Printf("Computing epoch %d nonce from chain data...", epoch)
+			computeCtx, computeCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer computeCancel()
+			nonce, err = nt.ComputeEpochNonce(computeCtx, epoch)
+			if err == nil {
+				cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cacheCancel()
+				if storeErr := nt.store.SetFinalNonce(cacheCtx, epoch, nonce, "computed"); storeErr != nil {
+					log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
+				}
+				return nonce, nil
+			}
+			log.Printf("Failed to compute nonce for epoch %d from chain data: %v, trying Koios", epoch, err)
+		} else {
+			log.Printf("Sync incomplete for epoch %d (last synced slot %d < epoch end slot %d), using Koios",
+				epoch, lastSlot, targetEpochEndSlot)
 		}
-		// Cache computed nonce
-		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cacheCancel()
-		if storeErr := nt.store.SetFinalNonce(cacheCtx, epoch, nonce, "computed"); storeErr != nil {
-			log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
-		}
-		return nonce, nil
 	}
 
-	// Lite mode only: Koios fallback
-	log.Printf("Falling back to Koios for epoch %d nonce (lite mode)", epoch)
+	// Koios fallback (lite mode, or full mode when sync is incomplete)
+	log.Printf("Falling back to Koios for epoch %d nonce", epoch)
 	nonce, err = nt.fetchNonceFromKoios(ctx, epoch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get nonce for epoch %d: %w", epoch, err)
