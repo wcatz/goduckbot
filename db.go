@@ -432,3 +432,53 @@ func (r *pgBlockVrfRows) Close() {
 func (r *pgBlockVrfRows) Err() error {
 	return r.err
 }
+
+func (s *PgStore) GetLastNBlocks(ctx context.Context, n int) ([]BlockRecord, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT slot, epoch, block_hash FROM blocks ORDER BY slot DESC LIMIT $1`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []BlockRecord
+	for rows.Next() {
+		var r BlockRecord
+		if err := rows.Scan(&r.Slot, &r.Epoch, &r.BlockHash); err != nil {
+			return nil, err
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+func (s *PgStore) GetBlockCountForEpoch(ctx context.Context, epoch int) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM blocks WHERE epoch = $1`, epoch).Scan(&count)
+	return count, err
+}
+
+func (s *PgStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT nonce_value FROM blocks WHERE epoch = $1 ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var values [][]byte
+	for rows.Next() {
+		var nonce []byte
+		if err := rows.Scan(&nonce); err != nil {
+			return nil, err
+		}
+		values = append(values, nonce)
+	}
+	return values, rows.Err()
+}
+
+func (s *PgStore) TruncateAll(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules`)
+	return err
+}
