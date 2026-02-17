@@ -365,7 +365,11 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 		candidateEpoch := epoch - 1
 		candidate, candErr := nt.store.GetCandidateNonce(ctx, candidateEpoch)
 		if candErr == nil && candidate != nil {
+			// Try DB first, fall back to Koios blocks API for η_ph
 			prevEpochHash, hashErr := nt.store.GetLastBlockHashForEpoch(ctx, candidateEpoch-1)
+			if hashErr != nil || prevEpochHash == "" {
+				prevEpochHash, hashErr = nt.fetchLastBlockHashFromKoios(ctx, candidateEpoch-1)
+			}
 			if hashErr == nil && prevEpochHash != "" {
 				hashBytes, _ := hex.DecodeString(prevEpochHash)
 				nonce = hashConcat(candidate, hashBytes)
@@ -983,4 +987,39 @@ func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]b
 	}
 
 	return nonce, nil
+}
+
+// fetchLastBlockHashFromKoios returns the hash of the last block in the given epoch
+// via the Koios REST API. Used as fallback when local blocks table has gaps.
+func (nt *NonceTracker) fetchLastBlockHashFromKoios(ctx context.Context, epoch int) (string, error) {
+	url := fmt.Sprintf("https://api.koios.rest/api/v1/blocks?epoch_no=eq.%d&order=block_height.desc&limit=1&select=hash", epoch)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("koios HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result []struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing response: %w", err)
+	}
+	if len(result) == 0 || result[0].Hash == "" {
+		return "", fmt.Errorf("no blocks returned for epoch %d", epoch)
+	}
+
+	return result[0].Hash, nil
 }
