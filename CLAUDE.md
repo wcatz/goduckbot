@@ -1,6 +1,6 @@
 # goduckbot - Claude Code Context
 
-Cardano stake pool notification bot with chain sync and built-in CPRAOS leaderlog calculation. Supports two modes: **lite** (adder tail + Koios fallback) and **full** (historical Shelley-to-tip sync via gouroboros NtN).
+Cardano stake pool notification bot with chain sync and built-in CPraos leaderlog calculation. Supports two modes: **lite** (adder tail + Koios fallback) and **full** (historical Shelley-to-tip sync via gouroboros NtN).
 
 ## Architecture
 
@@ -8,10 +8,11 @@ Cardano stake pool notification bot with chain sync and built-in CPRAOS leaderlo
 |------|---------|
 | `main.go` | Core: config, adder pipeline, block notifications, leaderlog orchestration, mode/social toggles, batch processing goroutine |
 | `commands.go` | Telegram bot command handlers, inline keyboard buttons (`btnLeaderlogNext`, `btnNonceNext`, `btnDuckGif`, etc.), callback routing |
-| `leaderlog.go` | CPRAOS leader schedule calculation, VRF key parsing, epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
+| `leaderlog.go` | CPraos leader schedule calculation, VRF key parsing, epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
 | `nonce.go` | Nonce evolution tracker (VRF accumulation per block, genesis-seeded or zero-seeded), batch processing (`ProcessBatch`) |
 | `store.go` | `Store` interface + SQLite implementation (`SqliteStore` via `modernc.org/sqlite`, pure Go, no CGO) |
 | `db.go` | PostgreSQL implementation (`PgStore` via `pgx/v5`) of the `Store` interface, bulk insert via pgx CopyFrom |
+| `integrity.go` | Startup DB integrity check — FindIntersect validation + nonce repair for HA failover |
 | `sync.go` | Historical chain syncer using gouroboros NtN ChainSync protocol, era-specific VRF extraction |
 
 ## Modes
@@ -69,7 +70,7 @@ All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 - Inline keyboard buttons for `/leaderlog`, `/nonce`, `/duck` subcommands
 - Social network toggles: `telegram.enabled`, `twitter.enabled` in config
 - Chain sync using blinklabs-io/adder with auto-reconnect and host failover
-- Built-in CPRAOS leaderlog calculation (replaces cncli sidecar)
+- Built-in CPraos leaderlog calculation (replaces cncli sidecar)
 - Multi-network epoch calculation (mainnet, preprod, preview)
 - VRF nonce evolution tracked per block in SQLite or PostgreSQL
 - NtC local state query for direct stake snapshots (mark/set/go)
@@ -79,8 +80,8 @@ All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 
 ## Leaderlog
 
-### CPRAOS Algorithm
-Validated against cncli for preview and mainnet. Key difference from gouroboros `consensus.IsSlotLeader()`: Cardano uses CPRAOS (256-bit) not TPraos (512-bit).
+### CPraos Algorithm
+Validated against cncli for preview and mainnet. Key difference from gouroboros `consensus.IsSlotLeader()`: Cardano uses CPraos (256-bit) not TPraos (512-bit).
 
 ```
 VRF input     = BLAKE2b-256(slot || epochNonce)
@@ -453,36 +454,17 @@ Added `ResyncFromDB()` call between retry attempts to prevent nonce corruption w
 
 ---
 
-## v2.7.9 Critical Fix (2026-02-11)
+## v2.7.9 Fix (2026-02-11) — REVERTED in v2.8.0
 
-### Epoch Nonce Off-By-One Bug
+### Epoch Nonce Off-By-One Bug (MISDIAGNOSIS)
 
-**Problem:** Leaderlog predictions were 0% accurate because the code was fetching the WRONG epoch nonce.
-- For epoch N leaderlog, code was fetching `GetNonceForEpoch(N)`
-- Should fetch `GetNonceForEpoch(N-1)` because epoch_nonces table stores nonces BY THE EPOCH THEY'RE COMPUTED IN
-- User discovered this: "you calculate +1? lol forget to account for table )?"
+**v2.7.9 changed** all leaderlog nonce lookups from `GetNonceForEpoch(N)` to `GetNonceForEpoch(N-1)`, based on the incorrect assumption that `epoch_nonces` stores nonces by the epoch they're computed during.
 
-**Root Cause:** Table semantics mismatch
-- `epoch_nonces` table: stores final_nonce in the row for the epoch it was COMPUTED during
-- For epoch 612 leaderlog: need final_nonce from epoch 611 row
-- For epoch 613 leaderlog: need final_nonce from epoch 612 row
+**v2.8.0 reverted this** — the `epoch - 1` offset was itself wrong.
 
-**Solution:** Changed all 4 locations to fetch epoch-1 nonce
-- commands.go line 446: /leaderlog command
-- commands.go line 556: menu handler
-- commands.go line 940: /nextblock command
-- main.go line 1308: automatic leaderlog trigger
+**Actual table semantics** (verified by comparing 25 random epochs against Koios API):
+- `epoch_nonces[N].final_nonce` = the nonce used **for** epoch N's leader election
+- For epoch N leaderlog: use `GetNonceForEpoch(N)` directly
+- The nonce backfill stores nonces indexed to the epoch they're used for, verified against Koios for epochs 209-612
 
-**Verification:**
-- cncli leaderlog comparison showed 100% match (21 slots identical) for epoch 612
-- However, actual on-chain blocks for epoch 612: 8 blocks at different slots (0% overlap with predictions)
-- This confirmed the nonce was wrong
-- Fix deployed with fresh `goduckbot_v2` database
-
-**Deployment Status:**
-- **Image:** `wcatz/goduckbot:2.7.9`
-- **Database:** Fresh `goduckbot_v2` (bypassed CNPG PITR restoration issues)
-- **Sync:** Completed from Shelley epoch 208 to tip (epoch 612) in ~37 minutes
-- **Nonce Evolution:** All nonces recomputed correctly with fix
-- **Next Verification:** Epoch 613 predictions vs actual blocks will prove the fix works
-- **Known Issue:** NtC stake queries still failing after 6 seconds (Koios fallback in use)
+**Why the original v2.7.9 "fix" appeared to work:** At that time, the DB contained corrupt nonces from incomplete sync runs (block_count=0, source="computed"). Both `GetNonceForEpoch(N)` and `GetNonceForEpoch(N-1)` returned wrong values because the underlying data was bad, making it impossible to determine correct indexing. The epoch 467 leaderlog test (14/14 blocks matched using Koios epoch 467 nonce directly) proved the correct semantics.
