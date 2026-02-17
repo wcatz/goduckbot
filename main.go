@@ -508,6 +508,22 @@ func (i *Indexer) runChainTail() error {
 		log.Println("WARNING: full mode requires leaderlog.enabled; falling back to lite mode")
 	}
 
+	// DB integrity check (full mode only) — validates that stored blocks exist
+	// on the canonical chain and that nonce state is consistent with block data.
+	// Catches data loss from CNPG async replication failover.
+	if fullMode && len(i.nodeAddresses) > 0 {
+		valCtx, valCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		result, valErr := ValidateDBIntegrity(valCtx, i.store, i.nonceTracker, i.nodeAddresses[0], i.networkMagic)
+		valCancel()
+
+		if valErr != nil {
+			log.Printf("WARNING: DB integrity check failed: %v (proceeding with caution)", valErr)
+		} else if result.Truncated {
+			// DB was corrupt and wiped — reinitialize nonce tracker with genesis seed
+			i.nonceTracker = NewNonceTracker(i.store, i.koios, i.epoch, i.networkMagic, true)
+		}
+	}
+
 	// Full mode: run historical sync before starting adder pipeline
 	if fullMode && len(i.nodeAddresses) > 0 {
 		log.Println("Starting historical chain sync...")
