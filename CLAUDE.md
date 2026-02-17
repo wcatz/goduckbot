@@ -9,10 +9,11 @@ Cardano stake pool notification bot with chain sync and built-in CPraos leaderlo
 | `main.go` | Core: config, adder pipeline, block notifications, leaderlog orchestration, mode/social toggles, batch processing goroutine |
 | `commands.go` | Telegram bot command handlers, inline keyboard buttons (`btnLeaderlogNext`, `btnNonceNext`, `btnDuckGif`, etc.), callback routing |
 | `leaderlog.go` | CPraos leader schedule calculation, VRF key parsing, epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
-| `nonce.go` | Nonce evolution tracker (VRF accumulation per block, genesis-seeded or zero-seeded), batch processing (`ProcessBatch`) |
+| `nonce.go` | Nonce evolution tracker (VRF accumulation per block, genesis-seeded or zero-seeded), TICKN computation, batch processing (`ProcessBatch`) |
 | `store.go` | `Store` interface + SQLite implementation (`SqliteStore` via `modernc.org/sqlite`, pure Go, no CGO) |
-| `db.go` | PostgreSQL implementation (`PgStore` via `pgx/v5`) of the `Store` interface, bulk insert via pgx CopyFrom |
+| `db.go` | PostgreSQL implementation (`PgStore` via `pgx/v5`) of the `Store` interface, bulk insert via staging table + CopyFrom |
 | `integrity.go` | Startup DB integrity check — FindIntersect validation + nonce repair for HA failover |
+| `localquery.go` | NtC local state query client for direct stake snapshots from cardano-node |
 | `sync.go` | Historical chain syncer using gouroboros NtN ChainSync protocol, era-specific VRF extraction |
 
 ## Modes
@@ -28,7 +29,8 @@ Cardano stake pool notification bot with chain sync and built-in CPraos leaderlo
 - Nonce tracker seeded with Shelley genesis hash (`1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81`)
 - Skips Byron era (no VRF data), starts from last Byron block intersect point
 - Once caught up (within 120 slots of tip), transitions to adder live tail
-- Builds complete local nonce history — enables retroactive leaderlog and missed block detection
+- Builds complete local nonce history — enables TICKN nonce computation, retroactive leaderlog, and missed block detection
+- Unlimited retry with capped backoff (5s-30s) on keep-alive timeouts during historical sync
 - Config: `mode: "full"`
 
 ### Intersect Points (Shelley start)
@@ -44,23 +46,35 @@ Abstract database layer supporting SQLite (default) and PostgreSQL:
 
 ```go
 type Store interface {
-    InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue) (bool, error)  // returns (inserted, err)
+    InsertBlock(ctx, slot, epoch, blockHash, vrfOutput, nonceValue) (bool, error)
+    InsertBlockBatch(ctx, blocks []BlockData) error
     GetBlockHash(ctx, slot) (string, error)
+    GetBlockByHash(ctx, hashPrefix) ([]BlockRecord, error)
+    GetLastNBlocks(ctx, n) ([]BlockRecord, error)
+    GetBlockCountForEpoch(ctx, epoch) (int, error)
+    GetForgedSlots(ctx, epoch) ([]uint64, error)
+    GetLastSyncedSlot(ctx) (uint64, error)
     UpsertEvolvingNonce(ctx, epoch, nonce, blockCount) error
     SetCandidateNonce(ctx, epoch, nonce) error
     SetFinalNonce(ctx, epoch, nonce, source) error
     GetFinalNonce(ctx, epoch) ([]byte, error)
     GetEvolvingNonce(ctx, epoch) ([]byte, int, error)
+    GetCandidateNonce(ctx, epoch) ([]byte, error)
+    GetLastBlockHashForEpoch(ctx, epoch) (string, error)
+    GetNonceValuesForEpoch(ctx, epoch) ([][]byte, error)
+    StreamBlockNonces(ctx) (BlockNonceRows, error)
+    StreamBlockVrfOutputs(ctx) (BlockVrfRows, error)
     InsertLeaderSchedule(ctx, schedule) error
+    GetLeaderSchedule(ctx, epoch) (*LeaderSchedule, error)
     IsSchedulePosted(ctx, epoch) bool
     MarkSchedulePosted(ctx, epoch) error
-    GetLastSyncedSlot(ctx) (uint64, error)
+    TruncateAll(ctx) error
     Close() error
 }
 ```
 
 - **SQLite** (`SqliteStore`): Default for Docker/standalone. Uses WAL mode, single-writer, `modernc.org/sqlite` (pure Go, CGO_ENABLED=0 compatible).
-- **PostgreSQL** (`PgStore`): For K8s deployments with CNPG. Uses `pgx/v5` connection pool.
+- **PostgreSQL** (`PgStore`): For K8s deployments with CNPG. Uses `pgx/v5` connection pool. `InsertBlockBatch` uses temp staging table + `INSERT ... ON CONFLICT DO NOTHING` for duplicate-safe bulk inserts.
 
 All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 
@@ -73,15 +87,17 @@ All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 - Built-in CPraos leaderlog calculation (replaces cncli sidecar)
 - Multi-network epoch calculation (mainnet, preprod, preview)
 - VRF nonce evolution tracked per block in SQLite or PostgreSQL
+- TICKN nonce computation from local chain data (full mode) with Koios fallback
 - NtC local state query for direct stake snapshots (mark/set/go)
-- Koios API integration for stake data and nonce fallback
+- Koios API integration for stake data and nonce/block-hash fallback
 - WebSocket broadcast for block events
 - Telegram message chunking for messages >4096 chars
+- DB integrity check on startup with nonce repair
 
 ## Leaderlog
 
 ### CPraos Algorithm
-Validated against cncli for preview and mainnet. Key difference from gouroboros `consensus.IsSlotLeader()`: Cardano uses CPraos (256-bit) not TPraos (512-bit).
+Validated against cncli for preview and mainnet (epoch 444: 35/35 actual blocks matched predictions). Key difference from gouroboros `consensus.IsSlotLeader()`: Cardano uses CPraos (256-bit) not TPraos (512-bit).
 
 ```
 VRF input     = BLAKE2b-256(slot || epochNonce)
@@ -91,15 +107,31 @@ Threshold     = 2^256 * (1 - (1-0.05)^sigma)
 Is leader     = leaderValue < threshold
 ```
 
-### Nonce Evolution
-Per block: `vrfNonceValue = BLAKE2b-256(vrfOutput)`, then `eta_v = BLAKE2b-256(eta_v || vrfNonceValue)` (Cardano Nonce semigroup: BLAKE2b-256 concatenation, NOT XOR). Rolling eta_v accumulates across epoch boundaries (no reset). Candidate nonce (`η_c`) freezes at 60% epoch progress (stability window = 259,200 slots on mainnet). At each epoch boundary, the TICKN rule computes: `epochNonce = BLAKE2b-256(η_c || η_ph)` where `η_ph` is the block hash from the last block of the prior epoch. Koios used as fallback in lite mode when local nonce unavailable.
+### Nonce Evolution & TICKN Rule
 
-**Batch processing:** `ProcessBatch()` method in `nonce.go` performs in-memory nonce evolution for batches of blocks (used during historical sync), then persists the final nonce state in a single DB transaction. This dramatically improves sync performance vs per-block DB writes.
+Per block: `vrfNonceValue = BLAKE2b-256(vrfOutput)`, then `eta_v = BLAKE2b-256(eta_v || vrfNonceValue)` (Cardano Nonce semigroup: BLAKE2b-256 concatenation, NOT XOR). Rolling eta_v accumulates across epoch boundaries (no reset).
+
+Candidate nonce (`η_c`) freezes at 60% epoch progress (stability window = 259,200 slots on mainnet).
+
+**TICKN rule** (epoch boundary nonce computation):
+```
+epochNonce(N+1) = BLAKE2b-256(η_c(N) || η_ph(N-1))
+```
+Where `η_c(N)` is the frozen candidate nonce from epoch N, and `η_ph(N-1)` is the block hash of the last block in epoch N-1.
+
+**Data sources for TICKN:**
+- `GetCandidateNonce(epoch)` — from local DB (primary)
+- `GetLastBlockHashForEpoch(epoch)` — from local DB, falls back to `fetchLastBlockHashFromKoios()` via Koios REST API `/api/v1/blocks?select=hash&epoch_no=eq.{N}&order=block_no.desc&limit=1`
+- Koios epoch nonce fallback in lite mode: `GetEpochParams` API
+
+**Table semantics:** `epoch_nonces[N].final_nonce` = the nonce used **for** epoch N's leader election. For epoch N leaderlog, use `GetNonceForEpoch(N)` directly.
+
+**Batch processing:** `ProcessBatch()` method in `nonce.go` performs in-memory nonce evolution for batches of blocks (used during historical sync), then persists the final nonce state in a single DB transaction.
 
 ### Trigger Flow
-1. Every block: extract VRF output from header, update evolving nonce via XOR
+1. Every block: extract VRF output from header, update evolving nonce
 2. At 60% epoch progress (stability window): freeze candidate nonce
-3. After freeze: calculate next epoch schedule (mutex-guarded, one goroutine per epoch)
+3. After freeze: compute next epoch nonce via TICKN, calculate leader schedule (mutex-guarded, one goroutine per epoch)
 4. Post schedule to Telegram, store in database
 
 ### Race Condition Prevention
@@ -118,6 +150,7 @@ Two extraction paths depending on sync mode:
 - Receives `ledger.BlockHeader` directly, type-asserts to era-specific header
 - Same VRF field access pattern as adder path
 - Skips Byron blocks (no VRF data)
+- Must match concrete Go types (e.g. `*mary.MaryBlockHeader`), not embedded base types
 
 ### Network Constants
 
@@ -144,13 +177,14 @@ Constants defined in `leaderlog.go`: `MainnetNetworkMagic`, `PreprodNetworkMagic
 
 | Data | Source | Notes |
 |------|--------|-------|
-| VRF signing key | Mounted K8s secret `/keys/vrf.skey` | CBOR envelope with `5840` prefix, 64-byte key |
-| Epoch nonce | Local chain sync (primary), Koios (fallback) | `GetEpochParams` |
-| Pool stake | Koios `GetPoolInfo` | `ActiveStake` is `decimal.Decimal`, use `.IntPart()` |
-| Total stake | Koios `GetEpochInfo` | `ActiveStake` is `decimal.Decimal`, use `.IntPart()` |
+| VRF signing key | K8s secret or inline `vrfKeyValue` | CBOR envelope with `5840` prefix, 64-byte key |
+| Epoch nonce | TICKN from local data (primary), Koios (fallback) | `GetEpochParams` |
+| Pool stake | NtC LocalStateQuery (primary), Koios (fallback) | `GetPoolInfo` → `ActiveStake.IntPart()` |
+| Total stake | NtC LocalStateQuery (primary), Koios (fallback) | `GetEpochInfo` → `ActiveStake.IntPart()` |
+| η_ph (prev epoch block hash) | Local DB (primary), Koios blocks API (fallback) | For TICKN computation |
 
 ### Database Schema (auto-created by Store constructors)
-- `blocks` — per-block VRF data (slot, epoch, block_hash, vrf_output, nonce_value)
+- `blocks` — per-block VRF data (slot PK, epoch, block_hash, vrf_output, nonce_value)
 - `epoch_nonces` — evolving/candidate/final nonces per epoch with source tracking
 - `leader_schedules` — calculated schedules with slots JSON, posted flag
 
@@ -165,25 +199,33 @@ poolName: "Pool Name"
 nodeAddress:
   host1: "node:3001"
   host2: "backup-node:3001"  # optional failover
+  ntcHost: "node:30000"      # NtC for stake queries (optional)
 networkMagic: 764824073
 
 telegram:
   enabled: true              # toggle Telegram notifications
   channel: "CHANNEL_ID"
+  allowedUsers: [USER_ID]    # admin user IDs
+  allowedGroups: [GROUP_ID]  # groups where safe commands allowed
   # token via TELEGRAM_TOKEN env var
 
 twitter:
   enabled: false             # toggle Twitter notifications
   # credentials via env vars
 
+duck:
+  media: "gif"               # "gif", "img", or "both"
+
 leaderlog:
   enabled: true
-  vrfKeyPath: "/keys/vrf.skey"
+  vrfKeyValue: "5840..."     # inline CBOR hex (preferred)
+  vrfKeyPath: "/keys/vrf.skey"  # file path (fallback)
   timezone: "America/New_York"
+  timeFormat: "12h"
 
 database:
   driver: "sqlite"           # "sqlite" (default) or "postgres"
-  path: "./goduckbot.db"     # SQLite file path
+  path: "/app/data/goduckbot.db"
   # PostgreSQL settings (driver: postgres)
   host: "postgres-host"
   port: 5432
@@ -192,21 +234,33 @@ database:
   password: ""               # Prefer GODUCKBOT_DB_PASSWORD env var
 ```
 
-**Note:** Database password uses `net/url.URL` for URL-safe encoding in connection strings. Passwords with special characters (`@`, `:`, `/`) are handled correctly.
+**Note:** Database password uses `net/url.URL` for URL-safe encoding in connection strings.
 
-## Helm Chart (v0.7.15)
+## Docker Compose
+
+```bash
+# Lite mode with SQLite (default)
+docker compose up -d
+
+# With PostgreSQL
+docker compose --profile postgres up -d
+```
+
+Requires `.env` file with secrets (gitignored):
+```
+GODUCKBOT_VERSION=3.0.0
+TELEGRAM_TOKEN=your_token
+GODUCKBOT_DB_PASSWORD=your_password  # only for postgres profile
+```
+
+## Helm Chart (v0.7.16)
 
 Key values:
 - `config.mode` — "lite" (default) or "full"
-- `config.telegram.enabled` / `config.twitter.enabled` — social network toggles (env vars conditionally injected)
-- `config.leaderlog.enabled` — enables VRF tracking and schedule calculation
-- `config.duck.media` — "gif", "img", or "both" (default)
-- `config.duck.customUrl` — optional custom duck image URL
+- `config.leaderlog.vrfKeyValue` — inline CBOR hex VRF key
 - `config.database.driver` — "sqlite" (default) or "postgres"
-- `config.database.path` — SQLite file path (default `/data/goduckbot.db`)
-- `persistence.enabled` — creates PVC for SQLite data when `database.driver=sqlite`
-- `vrfKey.secretName` — K8s secret containing vrf.skey (auto-mounted when `leaderlog.enabled` or `vrfKey.enabled`)
-- DB password secret only required when `leaderlog.enabled` AND `database.driver=postgres`
+- `persistence.enabled` — creates PVC for SQLite data
+- `vrfKey.secretName` — K8s secret containing vrf.skey (alternative to vrfKeyValue)
 
 ## Dockerfile
 
@@ -217,17 +271,8 @@ Multi-stage build: `golang:1.24-bookworm` builder + `debian:bookworm-slim` runti
 CI/CD handles Docker images AND helm charts on merge to master. NEVER build locally.
 
 ```bash
-# Build locally (dev only)
-CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o goduckbot .
-
-# CI builds on merge to master:
-#   - Docker: wcatz/goduckbot:latest, wcatz/goduckbot:master
-#   - Helm: oci://ghcr.io/wcatz/helm-charts/goduckbot
-
 # Versioned tags require git tag:
-git tag v2.5.0 && git push origin v2.5.0
-#   - Docker: wcatz/goduckbot:2.5.0, wcatz/goduckbot:2.5, wcatz/goduckbot:2
-#   - Helm chart published with matching version
+git tag v3.0.0 && git push origin v3.0.0
 
 # Deploy via helmfile (from infra repo)
 helmfile -e apps -l app=goduckbot apply
@@ -236,7 +281,7 @@ helmfile -e apps -l app=goduckbot apply
 ## Tests
 
 ```bash
-go test ./... -v    # 16 tests: store, nonce, leaderlog
+go test ./... -v    # 30 tests
 go vet ./...
 helm lint helm-chart/
 ```
@@ -244,227 +289,47 @@ helm lint helm-chart/
 Test files:
 - `store_test.go` — SQLite Store operations (in-memory `:memory:` DB)
 - `nonce_test.go` — VRF nonce hashing, nonce evolution, genesis seed
+- `nonce_koios_test.go` — Nonce verification against Koios API
 - `leaderlog_test.go` — SlotToEpoch (all networks), round-trip, formatNumber
+- `epoch467_test.go` — End-to-end leaderlog calculation for mainnet epoch 467
+- `epoch612_integration_test.go` — Integration test for epoch 612 leaderlog
 
 ## Key Dependencies
-- `blinklabs-io/adder` v0.37.1-pre (commit 460d03e, fixes auto-reconnect channel orphaning) — live chain tail
-- `blinklabs-io/gouroboros` v0.153.1 — VRF (ECVRF-ED25519-SHA512-Elligator2), NtN ChainSync, NtC LocalStateQuery, ledger types
+- `blinklabs-io/adder` v0.37.1-pre (commit 460d03e) — live chain tail with auto-reconnect
+- `blinklabs-io/gouroboros` v0.153.1 — VRF, NtN ChainSync, NtC LocalStateQuery, ledger types
 - `modernc.org/sqlite` — pure Go SQLite (no CGO required)
-- `jackc/pgx/v5` — PostgreSQL driver with COPY protocol support for bulk inserts
+- `jackc/pgx/v5` — PostgreSQL driver with COPY protocol support
 - `cardano-community/koios-go-client/v3` — Koios API
 - `golang.org/x/crypto` — blake2b hashing
 
 ## Performance Architecture
 
-**Historical sync pipeline:**
-1. `sync.go` ChainSync reads blocks from cardano-node via gouroboros NtN
+**Historical sync pipeline (full mode):**
+1. `sync.go` ChainSync reads blocks from cardano-node via gouroboros NtN (pipeline limit 50)
 2. Blocks sent to buffered channel (10,000 capacity) — decouples network I/O from DB writes
 3. Batch processor goroutine in `main.go` drains channel (1000 blocks or 2-second timeout)
 4. `nonce.go` ProcessBatch() evolves nonce in-memory for entire batch
-5. `db.go` PgStore persists batch via pgx CopyFrom (PostgreSQL COPY protocol)
-6. Result: ~3,300 blocks/sec sustained throughput, ~43 minutes for full Shelley-to-tip sync
+5. `db.go` PgStore.InsertBlockBatch() persists via temp staging table + CopyFrom:
+   - `CREATE TEMP TABLE blocks_staging (...) ON COMMIT DROP`
+   - CopyFrom into staging (no constraints = no duplicate key failures)
+   - `INSERT INTO blocks SELECT ... FROM blocks_staging ON CONFLICT (slot) DO NOTHING`
+6. Unlimited retry loop with capped backoff (5s-30s) on keep-alive timeouts
+7. Keep-alive tuned to 120s period / 30s timeout
 
----
+**Measured performance:**
+- ~1,800 avg blk/s sustained over full Shelley-to-tip sync (with retries)
+- ~8.56M blocks across 406 epochs (208-613)
+- ~2 hours total for full historical sync
+- ~2 GB PostgreSQL database size
 
-## Fixed Bugs Reference (2026-02-06)
-
-Three blocking bugs prevented full historical chain sync from completing. **All three have been FIXED and deployed** as of v1.2.0. This section is preserved for architectural context.
-
-### Bug 1: Mary/Allegra/Alonzo VRF Extraction — FIXED
-
-**Status:** RESOLVED in `sync.go` with type switch for all era-specific header types
-
-**Original symptom:** `Could not extract VRF from header type *mary.MaryBlockHeader (blockType=4)` spammed continuously. Sync ran but recorded zero blocks for Mary era and beyond.
-
-**Root cause:** In `extractVrfFromHeader()`, the type assertion `header.(*shelley.ShelleyBlockHeader)` failed for Mary/Allegra/Alonzo blocks because gouroboros returns them as distinct Go types (`*mary.MaryBlockHeader`, etc.) that **embed** `shelley.ShelleyBlockHeader` but don't satisfy direct type assertions.
-
-**Solution implemented:** Replaced blockType switch with type switch covering all era-specific header types:
-
-```go
-func extractVrfFromHeader(blockType uint, header ledger.BlockHeader) []byte {
-    // Skip Byron
-    if blockType == ledger.BlockTypeByronEbb || blockType == ledger.BlockTypeByronMain {
-        return nil
-    }
-    // Each era has its own Go type that embeds the previous era's header.
-    // Must check each concrete type — Go type assertions don't match embedded types.
-    switch h := header.(type) {
-    case *conway.ConwayBlockHeader:
-        return h.Body.VrfResult.Output
-    case *babbage.BabbageBlockHeader:
-        return h.Body.VrfResult.Output
-    case *alonzo.AlonzoBlockHeader:
-        return h.Body.NonceVrf.Output
-    case *mary.MaryBlockHeader:
-        return h.Body.NonceVrf.Output
-    case *allegra.AllegraBlockHeader:
-        return h.Body.NonceVrf.Output
-    case *shelley.ShelleyBlockHeader:
-        return h.Body.NonceVrf.Output
-    default:
-        log.Printf("Could not extract VRF from header type %T (blockType=%d)", header, blockType)
-        return nil
-    }
-}
-```
-
-**Key insight:** `MaryBlockHeader` embeds `ShelleyBlockHeader`, so `h.Body.NonceVrf.Output` works via promotion — but the type assertion must match the concrete type.
-
-### Bug 2: Resume Logic Corrupted Nonce Evolution — FIXED
-
-**Status:** RESOLVED with proper intersect point lookup and duplicate block detection
-
-**Original symptom:** `epoch_nonces.block_count` for early epochs inflated way beyond actual block count. Nonce values were corrupted.
-
-**Root cause:** On restart, `getIntersectForSlot()` always fell back to Shelley genesis because it didn't actually look up the block hash. The chain sync restarted from scratch every time, but `ProcessBlock()` restored the evolving nonce from DB and re-hashed the same VRF outputs into it, accumulating duplicates.
-
-**Solution implemented:**
-
-1. **Added `GetBlockHash()` method** to Store interface and both implementations:
-```go
-GetBlockHash(ctx context.Context, slot uint64) (string, error)
-```
-
-2. **Fixed `getIntersectForSlot()`** to actually query the DB:
-```go
-func (s *ChainSyncer) getIntersectForSlot(ctx context.Context, slot uint64) (pcommon.Point, error) {
-    hash, err := s.store.GetBlockHash(ctx, slot)
-    if err != nil {
-        return pcommon.Point{}, fmt.Errorf("no block hash for slot %d: %w", slot, err)
-    }
-    hashBytes, err := hex.DecodeString(hash)
-    if err != nil {
-        return pcommon.Point{}, fmt.Errorf("decoding hash: %w", err)
-    }
-    return pcommon.NewPoint(slot, hashBytes), nil
-}
-```
-
-3. **Modified `InsertBlock()` to return bool** indicating whether row was actually inserted:
-```go
-InsertBlock(ctx, ...) (bool, error)  // returns (inserted bool, err)
-```
-
-4. **Updated `ProcessBlock()` in nonce.go** to only evolve nonce if block was newly inserted (not a duplicate).
-
-### Bug 3: Keep-Alive Timeout on Slow DB Writes — FIXED
-
-**Status:** RESOLVED with buffered channel, batch writes via pgx CopyFrom, and retry/reconnect loop
-
-**Original symptom:** `keep-alive: timeout waiting on transition from protocol state Client` after ~15 minutes of historical sync. The cardano-node dropped the NtN connection because the client fell behind the keep-alive deadline.
-
-**Root cause:** Each block triggered synchronous DB writes (`InsertBlock()` + `UpsertEvolvingNonce()`). At ~5 blocks/sec with remote DB, accumulated latency exceeded the ouroboros mini-protocol keep-alive window.
-
-**Solution implemented:**
-
-1. **Decoupled sync from DB with buffered channel** (10,000 capacity) in `main.go`
-2. **Added batch processing** with `ProcessBatch()` method in `nonce.go`:
-   - Accumulates blocks in-memory
-   - Evolves nonce locally for entire batch
-   - Single DB persist per batch
-3. **Implemented pgx CopyFrom** for bulk inserts in `db.go`:
-   - Uses PostgreSQL COPY protocol for maximum performance
-   - Batch size: 1000 blocks or 2-second timeout
-4. **Added retry/reconnect loop** around historical sync in `main.go`:
-   - Max 10 retries with exponential backoff
-   - Recreates syncer on failure — resumes from GetLastSyncedSlot
-
-**Performance achieved:** ~3,300 blocks/sec (with CopyFrom batch writes)
-
-### Current K8s Deployment State
+## Current K8s Deployment State
 
 - **Pod**: `goduckbot` on `k3s-control-1`
 - **Node address**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:3001`
-- **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000` (same-node socat, no WireGuard)
+- **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000`
 - **DB**: PostgreSQL `goduckbot_v2` on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
 - **Mode**: full, leaderlog enabled, telegram enabled, twitter enabled
-- **Image**: `wcatz/goduckbot:2.7.9`
+- **Image**: `wcatz/goduckbot:2.8.5`
 - **Chart**: 0.7.16
 - **Duck media**: gif
-- **Test instance**: `goduckbot-test` shut down, database wiped
-
-### Full Sync Performance (clean run)
-
-- **Total blocks:** ~8.5M (Shelley epoch 208 → current epoch 611)
-- **At ~3,300 blocks/sec** (with CopyFrom batch writes): ~43 minutes
-- **Database size:** ~2 GB (blocks table: ~235 bytes/row × 8.5M rows)
-
----
-
-## v2.7.8 Critical Fixes (2026-02-11)
-
-Comprehensive bug fix release addressing goroutine leaks, query performance, and race conditions.
-
-### NtC Connection Leak Fix (localquery.go)
-
-**Problem:** `withQuery()` returned on context timeout but goroutine remained blocked in `GetStakeSnapshots()`, leaking both goroutines and TCP connections.
-
-**Solution:** Added connection cleanup on context expiration:
-```go
-select {
-case <-ctx.Done():
-    if conn != nil {
-        conn.Close()  // Unblock goroutine
-    }
-    <-connClosed  // Wait for cleanup
-    return ctx.Err()
-case r := <-ch:
-    return r.err
-}
-```
-
-### GetStakeSnapshots CBOR Encoding Fix (localquery.go)
-
-**Problem:** `PoolId [28]byte` encoded as CBOR array, causing cardano-node to ignore filter and return all ~3000 pools (2+ minute query).
-
-**Solution:** Wrap with `Blake2b224` type which has proper `MarshalCBOR()`:
-```go
-poolHash := ledger.Blake2b224(poolId)  // Encodes as CBOR bytestring
-result, qErr := client.GetStakeSnapshots([]any{poolHash})
-```
-
-### WebSocket Data Race Fix (main.go)
-
-**Problem:** Concurrent map access from HTTP handlers and `handleMessages` goroutine without synchronization.
-
-**Solution:** Added `clientsMutex sync.RWMutex` protecting all `clients` map operations.
-
-### Log.Fatal Crash Fix (main.go)
-
-**Problem:** Single bad WebSocket connection killed entire bot process.
-
-**Solution:** Changed `log.Fatal(err)` to `log.Printf` + return in WebSocket upgrade handler.
-
-### Keepalive Tuning (sync.go)
-
-Increased NtN keepalive from 60s/10s to 120s/30s to reduce reconnection frequency during heavy sync.
-
-### ResyncFromDB Between Retries (main.go)
-
-Added `ResyncFromDB()` call between retry attempts to prevent nonce corruption when historical sync reconnects mid-epoch.
-
-### Deployment Status
-
-- **Image:** `wcatz/goduckbot:2.7.8`
-- **Helm Chart:** `0.7.16`
-- **Nonce Computation:** Verified correct (matches Koios API for all tested epochs)
-- **Historical Sync:** Completed successfully from Shelley genesis
-- **Live Tailing:** Working at tip (epoch 612+)
-- **Known Issue:** NtC stake queries still timeout (Koios fallback working)
-
----
-
-## v2.7.9 Fix (2026-02-11) — REVERTED in v2.8.0
-
-### Epoch Nonce Off-By-One Bug (MISDIAGNOSIS)
-
-**v2.7.9 changed** all leaderlog nonce lookups from `GetNonceForEpoch(N)` to `GetNonceForEpoch(N-1)`, based on the incorrect assumption that `epoch_nonces` stores nonces by the epoch they're computed during.
-
-**v2.8.0 reverted this** — the `epoch - 1` offset was itself wrong.
-
-**Actual table semantics** (verified by comparing 25 random epochs against Koios API):
-- `epoch_nonces[N].final_nonce` = the nonce used **for** epoch N's leader election
-- For epoch N leaderlog: use `GetNonceForEpoch(N)` directly
-- The nonce backfill stores nonces indexed to the epoch they're used for, verified against Koios for epochs 209-612
-
-**Why the original v2.7.9 "fix" appeared to work:** At that time, the DB contained corrupt nonces from incomplete sync runs (block_count=0, source="computed"). Both `GetNonceForEpoch(N)` and `GetNonceForEpoch(N-1)` returned wrong values because the underlying data was bad, making it impossible to determine correct indexing. The epoch 467 leaderlog test (14/14 blocks matched using Koios epoch 467 nonce directly) proved the correct semantics.
+- **Known issue**: NtC stake queries timeout (Koios fallback working)
