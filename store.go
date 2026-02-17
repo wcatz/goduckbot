@@ -59,6 +59,8 @@ type Store interface {
 	GetLastNBlocks(ctx context.Context, n int) ([]BlockRecord, error)
 	GetBlockCountForEpoch(ctx context.Context, epoch int) (int, error)
 	GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error)
+	GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error)
+	GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error)
 	TruncateAll(ctx context.Context) error
 	Close() error
 }
@@ -559,6 +561,26 @@ func (s *SqliteStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([]
 		values = append(values, nonce)
 	}
 	return values, rows.Err()
+}
+
+func (s *SqliteStore) GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error) {
+	var nonce []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT candidate_nonce FROM epoch_nonces WHERE epoch = ? AND candidate_nonce IS NOT NULL`, epoch).Scan(&nonce)
+	if err != nil {
+		return nil, err
+	}
+	return nonce, nil
+}
+
+func (s *SqliteStore) GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT block_hash FROM blocks WHERE epoch = ? ORDER BY slot DESC LIMIT 1`, epoch).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
 }
 
 func (s *SqliteStore) TruncateAll(ctx context.Context) error {

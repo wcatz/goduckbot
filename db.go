@@ -478,6 +478,26 @@ func (s *PgStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]by
 	return values, rows.Err()
 }
 
+func (s *PgStore) GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error) {
+	var nonce []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT candidate_nonce FROM epoch_nonces WHERE epoch = $1 AND candidate_nonce IS NOT NULL`, epoch).Scan(&nonce)
+	if err != nil {
+		return nil, err
+	}
+	return nonce, nil
+}
+
+func (s *PgStore) GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error) {
+	var hash string
+	err := s.pool.QueryRow(ctx,
+		`SELECT block_hash FROM blocks WHERE epoch = $1 ORDER BY slot DESC LIMIT 1`, epoch).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
 func (s *PgStore) TruncateAll(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules`)
 	return err

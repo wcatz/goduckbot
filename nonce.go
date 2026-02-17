@@ -357,7 +357,29 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 		}
 	}
 
-	// Koios fallback (lite mode, or full mode when sync is incomplete)
+	// Full mode: compute next epoch nonce from frozen candidate + η_ph (TICKN rule).
+	// This handles the leaderlog trigger case: at 60% of epoch N, we need epoch N+1's nonce
+	// which doesn't exist in DB or Koios yet. We compute it from:
+	//   epochNonce = BLAKE2b-256(candidateNonce_N || lastBlockHash_of_epoch_N-1)
+	if nt.fullMode {
+		candidateEpoch := epoch - 1
+		candidate, candErr := nt.store.GetCandidateNonce(ctx, candidateEpoch)
+		if candErr == nil && candidate != nil {
+			prevEpochHash, hashErr := nt.store.GetLastBlockHashForEpoch(ctx, candidateEpoch-1)
+			if hashErr == nil && prevEpochHash != "" {
+				hashBytes, _ := hex.DecodeString(prevEpochHash)
+				nonce = hashConcat(candidate, hashBytes)
+				log.Printf("Computed epoch %d nonce from candidate(%d) + η_ph(%d): %s",
+					epoch, candidateEpoch, candidateEpoch-1, hex.EncodeToString(nonce))
+				if storeErr := nt.store.SetFinalNonce(ctx, epoch, nonce, "computed"); storeErr != nil {
+					log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
+				}
+				return nonce, nil
+			}
+		}
+	}
+
+	// Koios fallback (lite mode, or full mode when above paths failed)
 	log.Printf("Falling back to Koios for epoch %d nonce", epoch)
 	nonce, err = nt.fetchNonceFromKoios(ctx, epoch)
 	if err != nil {
