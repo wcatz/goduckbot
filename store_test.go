@@ -190,3 +190,186 @@ func TestLeaderSchedule(t *testing.T) {
 		t.Fatalf("InsertLeaderSchedule upsert: %v", err)
 	}
 }
+
+func TestGetLastNBlocks(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Empty DB returns empty slice
+	blocks, err := store.GetLastNBlocks(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetLastNBlocks empty: %v", err)
+	}
+	if len(blocks) != 0 {
+		t.Fatalf("expected 0 blocks, got %d", len(blocks))
+	}
+
+	// Insert 20 blocks across 2 epochs
+	for i := 0; i < 20; i++ {
+		epoch := 1
+		if i >= 10 {
+			epoch = 2
+		}
+		slot := uint64(100 + i*10)
+		_, err := store.InsertBlock(ctx, slot, epoch, "hash"+string(rune('a'+i)), []byte{byte(i)}, []byte{byte(i)})
+		if err != nil {
+			t.Fatalf("InsertBlock %d: %v", i, err)
+		}
+	}
+
+	// Request 10 — should get the 10 newest in descending order
+	blocks, err = store.GetLastNBlocks(ctx, 10)
+	if err != nil {
+		t.Fatalf("GetLastNBlocks: %v", err)
+	}
+	if len(blocks) != 10 {
+		t.Fatalf("expected 10 blocks, got %d", len(blocks))
+	}
+	// First block should be the highest slot
+	if blocks[0].Slot != 290 {
+		t.Fatalf("expected first block slot 290, got %d", blocks[0].Slot)
+	}
+	// Last block should be the 10th highest
+	if blocks[9].Slot != 200 {
+		t.Fatalf("expected last block slot 200, got %d", blocks[9].Slot)
+	}
+	// Should be in descending order
+	for i := 1; i < len(blocks); i++ {
+		if blocks[i].Slot >= blocks[i-1].Slot {
+			t.Fatalf("blocks not in descending order at index %d: %d >= %d", i, blocks[i].Slot, blocks[i-1].Slot)
+		}
+	}
+
+	// Request more than available
+	blocks, err = store.GetLastNBlocks(ctx, 100)
+	if err != nil {
+		t.Fatalf("GetLastNBlocks overflow: %v", err)
+	}
+	if len(blocks) != 20 {
+		t.Fatalf("expected 20 blocks, got %d", len(blocks))
+	}
+}
+
+func TestGetBlockCountForEpoch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Empty epoch returns 0
+	count, err := store.GetBlockCountForEpoch(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetBlockCountForEpoch empty: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0, got %d", count)
+	}
+
+	// Insert blocks in two epochs
+	_, _ = store.InsertBlock(ctx, 100, 1, "h1", []byte{1}, []byte{1})
+	_, _ = store.InsertBlock(ctx, 200, 1, "h2", []byte{2}, []byte{2})
+	_, _ = store.InsertBlock(ctx, 300, 1, "h3", []byte{3}, []byte{3})
+	_, _ = store.InsertBlock(ctx, 500, 2, "h4", []byte{4}, []byte{4})
+	_, _ = store.InsertBlock(ctx, 600, 2, "h5", []byte{5}, []byte{5})
+
+	count, err = store.GetBlockCountForEpoch(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetBlockCountForEpoch epoch 1: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3, got %d", count)
+	}
+
+	count, err = store.GetBlockCountForEpoch(ctx, 2)
+	if err != nil {
+		t.Fatalf("GetBlockCountForEpoch epoch 2: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2, got %d", count)
+	}
+}
+
+func TestGetNonceValuesForEpoch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert blocks with known nonce values
+	_, _ = store.InsertBlock(ctx, 100, 1, "h1", []byte{1}, []byte{0xAA})
+	_, _ = store.InsertBlock(ctx, 200, 1, "h2", []byte{2}, []byte{0xBB})
+	_, _ = store.InsertBlock(ctx, 300, 2, "h3", []byte{3}, []byte{0xCC})
+
+	values, err := store.GetNonceValuesForEpoch(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetNonceValuesForEpoch: %v", err)
+	}
+	if len(values) != 2 {
+		t.Fatalf("expected 2 values, got %d", len(values))
+	}
+	// Should be ordered by slot (100 then 200)
+	if values[0][0] != 0xAA {
+		t.Fatalf("expected first nonce 0xAA, got 0x%x", values[0][0])
+	}
+	if values[1][0] != 0xBB {
+		t.Fatalf("expected second nonce 0xBB, got 0x%x", values[1][0])
+	}
+}
+
+func TestTruncateAll(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Populate all 3 tables
+	_, _ = store.InsertBlock(ctx, 100, 1, "h1", []byte{1}, []byte{1})
+	_, _ = store.InsertBlock(ctx, 200, 1, "h2", []byte{2}, []byte{2})
+	_ = store.UpsertEvolvingNonce(ctx, 1, []byte{0xAA}, 2)
+	_ = store.InsertLeaderSchedule(ctx, &LeaderSchedule{
+		Epoch:         1,
+		EpochNonce:    "abc",
+		PoolStake:     100,
+		TotalStake:    1000,
+		AssignedSlots: []LeaderSlot{},
+		CalculatedAt:  time.Now().UTC(),
+	})
+
+	// Verify data exists
+	slot, _ := store.GetLastSyncedSlot(ctx)
+	if slot == 0 {
+		t.Fatal("expected blocks before truncate")
+	}
+
+	// Truncate
+	err := store.TruncateAll(ctx)
+	if err != nil {
+		t.Fatalf("TruncateAll: %v", err)
+	}
+
+	// Verify all tables are empty
+	slot, _ = store.GetLastSyncedSlot(ctx)
+	if slot != 0 {
+		t.Fatalf("expected 0 after truncate, got %d", slot)
+	}
+
+	count, _ := store.GetBlockCountForEpoch(ctx, 1)
+	if count != 0 {
+		t.Fatalf("expected 0 blocks after truncate, got %d", count)
+	}
+
+	_, _, nonceErr := store.GetEvolvingNonce(ctx, 1)
+	if nonceErr == nil {
+		t.Fatal("expected error getting nonce after truncate")
+	}
+
+	sched, schedErr := store.GetLeaderSchedule(ctx, 1)
+	if schedErr == nil && sched != nil {
+		t.Fatal("expected no schedule after truncate")
+	}
+}
+
+func TestTruncateAllEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Truncating empty tables should not error
+	err := store.TruncateAll(ctx)
+	if err != nil {
+		t.Fatalf("TruncateAll empty: %v", err)
+	}
+}
