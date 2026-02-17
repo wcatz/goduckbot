@@ -329,7 +329,7 @@ Test files:
 - **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000`
 - **DB**: PostgreSQL `goduckbot_v2` on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
 - **Mode**: full, leaderlog enabled, telegram enabled, twitter enabled
-- **Image**: `wcatz/goduckbot:2.8.5`
+- **Image**: `wcatz/goduckbot:3.0.0`
 - **Chart**: 0.7.16
 - **Duck media**: gif
 - **Known issue**: NtC stake queries timeout (Koios fallback working)
