@@ -1001,7 +1001,7 @@ func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]b
 // fetchLastBlockHashFromKoios returns the hash of the last block in the given epoch
 // via the Koios REST API. Used as fallback when local blocks table has gaps.
 func (nt *NonceTracker) fetchLastBlockHashFromKoios(ctx context.Context, epoch int) (string, error) {
-	url := fmt.Sprintf("https://api.koios.rest/api/v1/blocks?epoch_no=eq.%d&order=block_height.desc&limit=1&select=hash", epoch)
+	url := fmt.Sprintf("https://api.koios.rest/api/v1/blocks?epoch_no=eq.%d&order=block_height.desc&limit=1&select=hash,epoch_no,block_height", epoch)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
