@@ -8,7 +8,7 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 
 **Block Notifications** — Posts to Telegram and optionally Twitter/X when your pool mints a block. Includes tx count, block size, fill percentage, interval since last block, and running epoch/lifetime tallies.
 
-**Leader Schedule** — Pure Go CPRAOS implementation checking every slot per epoch against your VRF key. Calculates next epoch schedule automatically at the stability window (60% into epoch). On-demand via `/leaderlog`.
+**Leader Schedule** — Pure Go CPraos implementation checking every slot per epoch against your VRF key. Calculates next epoch schedule automatically at the stability window (60% into epoch). On-demand via `/leaderlog`.
 
 **Epoch Nonces** — In full mode, streams every block from Shelley genesis extracting VRF outputs per era, evolving the nonce via BLAKE2b-256 concatenation, and freezing at the stability window. Backfills ~400 epochs in under 2 minutes.
 
@@ -195,9 +195,9 @@ Set `database.driver: "postgres"` in config and `GODUCKBOT_DB_PASSWORD` in `.env
 
 ## How It Works
 
-### CPRAOS Leader Election
+### CPraos Leader Election
 
-duckBot implements the Cardano CPRAOS (Certified Praos) leader election algorithm in pure Go. This replaces external tools like cncli for leader schedule calculation. The implementation has been validated against cncli on both preview and mainnet with identical results.
+duckBot implements the Cardano CPraos leader election algorithm in pure Go. This replaces external tools like cncli for leader schedule calculation. The implementation has been validated against cncli on both preview and mainnet with identical results.
 
 For each slot in the target epoch:
 
@@ -209,7 +209,7 @@ For each slot in the target epoch:
 5. Is Leader     = leaderValue < threshold
 ```
 
-The "L" prefix in step 3 is the key difference from TPraos. CPRAOS uses a 256-bit comparison space; gouroboros `consensus.IsSlotLeader()` implements TPraos (512-bit) which produces different results. duckBot uses `vrf.Prove()` directly with the CPRAOS algorithm above.
+The "L" prefix in step 3 is the key difference from TPraos. CPraos uses a 256-bit comparison space; gouroboros `consensus.IsSlotLeader()` implements TPraos (512-bit) which produces different results. duckBot uses `vrf.Prove()` directly with the CPraos algorithm above.
 
 **Performance:** ~86 seconds for a full mainnet epoch (432,000 slots), ~17 seconds for preview (86,400 slots).
 
@@ -332,9 +332,10 @@ Lite mode:  adder pipeline only (intersect at tip)
 | `main.go` | Config, adder pipeline, block notifications, leaderlog orchestration |
 | `sync.go` | Historical chain syncer via NtN ChainSync |
 | `commands.go` | Telegram bot command handlers, inline keyboards |
-| `leaderlog.go` | CPRAOS schedule math, VRF key parsing, slot/epoch utilities |
+| `leaderlog.go` | CPraos schedule math, VRF key parsing, slot/epoch utilities |
 | `nonce.go` | Nonce evolution, batch processing, stability window freeze |
 | `localquery.go` | NtC local state query client (stake snapshots) |
+| `integrity.go` | Startup DB integrity check (FindIntersect + nonce repair) |
 | `store.go` | Store interface + SQLite implementation |
 | `db.go` | PostgreSQL implementation (pgx CopyFrom bulk inserts) |
 
@@ -342,7 +343,7 @@ Lite mode:  adder pipeline only (intersect at tip)
 
 [gouroboros](https://github.com/blinklabs-io/gouroboros) provides Go implementations of Cardano's Ouroboros mini-protocols. duckBot uses three subsystems:
 
-**VRF** (`gouroboros/vrf`) — Pure Go ECVRF-ED25519-SHA512-Elligator2 implementation. duckBot calls `vrf.Prove(vrfSkey[:32], vrfInput)` for CPRAOS leader election. This eliminates the need for C dependencies (libsodium) and enables `CGO_ENABLED=0` builds. The VRF output is 64 bytes; duckBot applies CPRAOS post-processing (`BLAKE2b-256("L" || output)`) for the 256-bit leader value.
+**VRF** (`gouroboros/vrf`) — Pure Go ECVRF-ED25519-SHA512-Elligator2 implementation. duckBot calls `vrf.Prove(vrfSkey[:32], vrfInput)` for CPraos leader election. This eliminates the need for C dependencies (libsodium) and enables `CGO_ENABLED=0` builds. The VRF output is 64 bytes; duckBot applies CPraos post-processing (`BLAKE2b-256("L" || output)`) for the 256-bit leader value.
 
 **NtN ChainSync** (`gouroboros/protocol/chainsync`) — Node-to-Node chain synchronization for historical sync. duckBot creates a connection with `ouroboros.NewConnection()` targeting port 3001, configures `chainsync.WithRollForwardFunc()` and `chainsync.WithPipelineLimit(50)` for high-throughput block streaming. Each block header is type-asserted to its era-specific type (`conway.ConwayBlockHeader`, `babbage.BabbageBlockHeader`, etc.) to extract VRF outputs.
 
