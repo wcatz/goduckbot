@@ -373,3 +373,68 @@ func TestTruncateAllEmpty(t *testing.T) {
 		t.Fatalf("TruncateAll empty: %v", err)
 	}
 }
+
+func TestGetCandidateNonce(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// No candidate set — should return error
+	_, err := store.GetCandidateNonce(ctx, 200)
+	if err == nil {
+		t.Fatal("expected error for missing candidate nonce")
+	}
+
+	// Set candidate and verify retrieval
+	nonce := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	if err := store.SetCandidateNonce(ctx, 200, nonce); err != nil {
+		t.Fatalf("SetCandidateNonce: %v", err)
+	}
+
+	got, err := store.GetCandidateNonce(ctx, 200)
+	if err != nil {
+		t.Fatalf("GetCandidateNonce: %v", err)
+	}
+	if len(got) != len(nonce) {
+		t.Fatalf("expected %x, got %x", nonce, got)
+	}
+	for i := range nonce {
+		if got[i] != nonce[i] {
+			t.Fatalf("expected %x, got %x", nonce, got)
+		}
+	}
+}
+
+func TestGetLastBlockHashForEpoch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// No blocks — should return error
+	_, err := store.GetLastBlockHashForEpoch(ctx, 200)
+	if err == nil {
+		t.Fatal("expected error for empty epoch")
+	}
+
+	// Insert blocks across two epochs
+	store.InsertBlock(ctx, 100, 200, "hash_a", []byte{1}, []byte{1})
+	store.InsertBlock(ctx, 200, 200, "hash_b", []byte{2}, []byte{2})
+	store.InsertBlock(ctx, 300, 200, "hash_c", []byte{3}, []byte{3})
+	store.InsertBlock(ctx, 400, 201, "hash_d", []byte{4}, []byte{4})
+
+	// Last block of epoch 200 should be hash_c (slot 300)
+	got, err := store.GetLastBlockHashForEpoch(ctx, 200)
+	if err != nil {
+		t.Fatalf("GetLastBlockHashForEpoch: %v", err)
+	}
+	if got != "hash_c" {
+		t.Fatalf("expected hash_c, got %s", got)
+	}
+
+	// Last block of epoch 201 should be hash_d
+	got, err = store.GetLastBlockHashForEpoch(ctx, 201)
+	if err != nil {
+		t.Fatalf("GetLastBlockHashForEpoch epoch 201: %v", err)
+	}
+	if got != "hash_d" {
+		t.Fatalf("expected hash_d, got %s", got)
+	}
+}
