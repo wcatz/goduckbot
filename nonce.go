@@ -358,19 +358,28 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	}
 
 	// Full mode: compute next epoch nonce from frozen candidate + η_ph (TICKN rule).
-	// This handles the leaderlog trigger case: at 60% of epoch N, we need epoch N+1's nonce
-	// which doesn't exist in DB or Koios yet. We compute it from:
-	//   epochNonce = BLAKE2b-256(candidateNonce_N || lastBlockHash_of_epoch_N-1)
+	// At 60% of epoch N, we need epoch N+1's nonce (not yet on Koios).
+	// epochNonce = BLAKE2b-256(candidateNonce_N || lastBlockHash_of_epoch_N-1)
 	if nt.fullMode {
 		candidateEpoch := epoch - 1
+		log.Printf("TICKN: attempting to compute epoch %d nonce from candidate(%d) + η_ph(%d)",
+			epoch, candidateEpoch, candidateEpoch-1)
 		candidate, candErr := nt.store.GetCandidateNonce(ctx, candidateEpoch)
-		if candErr == nil && candidate != nil {
+		if candErr != nil {
+			log.Printf("TICKN: GetCandidateNonce(%d) failed: %v", candidateEpoch, candErr)
+		} else if candidate == nil {
+			log.Printf("TICKN: GetCandidateNonce(%d) returned nil", candidateEpoch)
+		} else {
+			log.Printf("TICKN: got candidate for epoch %d: %s", candidateEpoch, hex.EncodeToString(candidate))
 			// Try DB first, fall back to Koios blocks API for η_ph
 			prevEpochHash, hashErr := nt.store.GetLastBlockHashForEpoch(ctx, candidateEpoch-1)
 			if hashErr != nil || prevEpochHash == "" {
+				log.Printf("TICKN: DB has no blocks for epoch %d, trying Koios", candidateEpoch-1)
 				prevEpochHash, hashErr = nt.fetchLastBlockHashFromKoios(ctx, candidateEpoch-1)
 			}
-			if hashErr == nil && prevEpochHash != "" {
+			if hashErr != nil {
+				log.Printf("TICKN: failed to get η_ph for epoch %d: %v", candidateEpoch-1, hashErr)
+			} else if prevEpochHash != "" {
 				hashBytes, _ := hex.DecodeString(prevEpochHash)
 				nonce = hashConcat(candidate, hashBytes)
 				log.Printf("Computed epoch %d nonce from candidate(%d) + η_ph(%d): %s",
