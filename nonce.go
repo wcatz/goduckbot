@@ -247,6 +247,54 @@ func (nt *NonceTracker) ResyncFromDB() {
 	log.Printf("ResyncFromDB: restored epoch %d, block count %d", epoch, blockCount)
 }
 
+// RecomputeCurrentEpochNonce recomputes the evolving nonce for a specific epoch
+// entirely from the blocks table. Used when the integrity check detects that
+// epoch_nonces.block_count disagrees with the actual block count (e.g., after
+// a CNPG async replication failover where UpsertEvolvingNonce writes were lost
+// but InsertBlock writes survived).
+func (nt *NonceTracker) RecomputeCurrentEpochNonce(ctx context.Context, epoch int) error {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+
+	// Start from previous epoch's final evolving nonce state.
+	// The evolving nonce rolls across epoch boundaries (no reset).
+	var etaV []byte
+	if epoch > 0 {
+		prevNonce, _, err := nt.store.GetEvolvingNonce(ctx, epoch-1)
+		if err == nil && prevNonce != nil {
+			etaV = prevNonce
+		}
+	}
+	if etaV == nil {
+		etaV = initialNonce(nt.fullMode)
+		log.Printf("RecomputeCurrentEpochNonce: no previous epoch nonce, using initial seed")
+	}
+
+	// Stream nonce values for this epoch's blocks and re-evolve
+	nonceValues, err := nt.store.GetNonceValuesForEpoch(ctx, epoch)
+	if err != nil {
+		return fmt.Errorf("querying blocks for epoch %d: %w", epoch, err)
+	}
+
+	for _, nv := range nonceValues {
+		etaV = evolveNonce(etaV, nv)
+	}
+
+	// Persist corrected nonce
+	if err := nt.store.UpsertEvolvingNonce(ctx, epoch, etaV, len(nonceValues)); err != nil {
+		return fmt.Errorf("persisting recomputed nonce for epoch %d: %w", epoch, err)
+	}
+
+	// Update in-memory state
+	nt.evolvingNonce = etaV
+	nt.currentEpoch = epoch
+	nt.blockCount = len(nonceValues)
+	nt.candidateFroze = false
+
+	log.Printf("RecomputeCurrentEpochNonce: epoch %d recomputed from %d blocks", epoch, len(nonceValues))
+	return nil
+}
+
 // FreezeCandidate freezes the candidate nonce at the stability window.
 func (nt *NonceTracker) FreezeCandidate(epoch int) {
 	nt.mu.Lock()

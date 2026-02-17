@@ -56,6 +56,10 @@ type Store interface {
 	GetLastSyncedSlot(ctx context.Context) (uint64, error)
 	StreamBlockNonces(ctx context.Context) (BlockNonceRows, error)
 	StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error)
+	GetLastNBlocks(ctx context.Context, n int) ([]BlockRecord, error)
+	GetBlockCountForEpoch(ctx context.Context, epoch int) (int, error)
+	GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error)
+	TruncateAll(ctx context.Context) error
 	Close() error
 }
 
@@ -508,4 +512,66 @@ func (r *sqliteBlockVrfRows) Close() {
 
 func (r *sqliteBlockVrfRows) Err() error {
 	return r.err
+}
+
+func (s *SqliteStore) GetLastNBlocks(ctx context.Context, n int) ([]BlockRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT slot, epoch, block_hash FROM blocks ORDER BY slot DESC LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []BlockRecord
+	for rows.Next() {
+		var r BlockRecord
+		var slotInt64 int64
+		if err := rows.Scan(&slotInt64, &r.Epoch, &r.BlockHash); err != nil {
+			return nil, err
+		}
+		r.Slot = uint64(slotInt64)
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+func (s *SqliteStore) GetBlockCountForEpoch(ctx context.Context, epoch int) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM blocks WHERE epoch = ?`, epoch).Scan(&count)
+	return count, err
+}
+
+func (s *SqliteStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT nonce_value FROM blocks WHERE epoch = ? ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var values [][]byte
+	for rows.Next() {
+		var nonce []byte
+		if err := rows.Scan(&nonce); err != nil {
+			return nil, err
+		}
+		values = append(values, nonce)
+	}
+	return values, rows.Err()
+}
+
+func (s *SqliteStore) TruncateAll(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, table := range []string{"blocks", "epoch_nonces", "leader_schedules"} {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+	return tx.Commit()
 }
