@@ -569,9 +569,9 @@ func (i *Indexer) runChainTail() error {
 			}
 		}()
 
-		// Retry loop — on keep-alive timeout, reconnect and resume from GetLastSyncedSlot
-		maxRetries := 10
-		for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Retry loop — on keep-alive timeout, reconnect and resume from GetLastSyncedSlot.
+		// No retry limit: keep going until caught up, with capped backoff.
+		for attempt := 1; ; attempt++ {
 			i.syncer = NewChainSyncer(
 				i.store,
 				i.networkMagic,
@@ -587,25 +587,28 @@ func (i *Indexer) runChainTail() error {
 					// Context canceled by onCaughtUp — sync is done
 					break
 				}
-				log.Printf("Historical sync error (attempt %d/%d): %s", attempt, maxRetries, err)
-				if attempt < maxRetries {
-					// Drain channel buffer — old syncer is dead so no new sends.
-					// Wait for writer goroutine to flush all buffered blocks to DB.
-					for len(blockCh) > 0 {
-						time.Sleep(100 * time.Millisecond)
-					}
-					// Give writer time to finish flushing the current in-flight batch
-					time.Sleep(3 * time.Second)
+				log.Printf("Historical sync error (attempt %d): %s", attempt, err)
 
-					// Resync NonceTracker from DB so in-memory state matches persisted state.
-					// Without this, the evolving nonce diverges when buffered blocks from
-					// the dead connection overlap with blocks from the new connection.
-					i.nonceTracker.ResyncFromDB()
-
-					time.Sleep(time.Duration(attempt) * 5 * time.Second)
-					continue
+				// Drain channel buffer — old syncer is dead so no new sends.
+				// Wait for writer goroutine to flush all buffered blocks to DB.
+				for len(blockCh) > 0 {
+					time.Sleep(100 * time.Millisecond)
 				}
-				log.Printf("Historical sync failed after %d attempts, falling through to adder", maxRetries)
+				// Give writer time to finish flushing the current in-flight batch
+				time.Sleep(3 * time.Second)
+
+				// Resync NonceTracker from DB so in-memory state matches persisted state.
+				// Without this, the evolving nonce diverges when buffered blocks from
+				// the dead connection overlap with blocks from the new connection.
+				i.nonceTracker.ResyncFromDB()
+
+				// Capped backoff: 5s, 10s, 15s, ... max 30s
+				backoff := time.Duration(attempt) * 5 * time.Second
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+				time.Sleep(backoff)
+				continue
 			}
 			break
 		}

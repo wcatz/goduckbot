@@ -257,17 +257,45 @@ func (s *PgStore) GetForgedSlots(ctx context.Context, epoch int) ([]uint64, erro
 }
 
 func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Temp table with no constraints — CopyFrom always succeeds even with duplicates
+	_, err = tx.Exec(ctx, `CREATE TEMP TABLE blocks_staging (
+		slot BIGINT, epoch INT, block_hash TEXT, vrf_output BYTEA, nonce_value BYTEA
+	) ON COMMIT DROP`)
+	if err != nil {
+		return err
+	}
+
 	rows := make([][]interface{}, len(blocks))
 	for i, b := range blocks {
 		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, b.NetworkMagic)
 		rows[i] = []interface{}{int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue}
 	}
-	_, err := s.pool.CopyFrom(ctx,
-		pgx.Identifier{"blocks"},
+
+	// COPY into staging (no constraints = no failures on duplicate keys)
+	_, err = tx.CopyFrom(ctx,
+		pgx.Identifier{"blocks_staging"},
 		[]string{"slot", "epoch", "block_hash", "vrf_output", "nonce_value"},
 		pgx.CopyFromRows(rows),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Merge into blocks — duplicates silently skipped
+	_, err = tx.Exec(ctx, `INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
+		SELECT slot, epoch, block_hash, vrf_output, nonce_value FROM blocks_staging
+		ON CONFLICT (slot) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (s *PgStore) StreamBlockNonces(ctx context.Context) (BlockNonceRows, error) {
