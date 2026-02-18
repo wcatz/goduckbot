@@ -1,0 +1,28 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "cardano-vrf-key"
+description = "Cardano VRF Signing Key (CBOR hex)"
+regex = '''5840[0-9a-fA-F]{128}'''
+keywords = ["5840"]
+
+[[rules]]
+id = "cardano-vrf-key-raw"
+description = "Cardano VRF Key (64-byte hex without CBOR prefix)"
+regex = '''(?i)(?:vrf|signing|skey).*[0-9a-f]{128}'''
+keywords = ["vrf", "signing", "skey"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram Bot Token"
+regex = '''[0-9]{8,10}:AA[0-9A-Za-z_-]{33}'''
+keywords = ["telegram", "token", "TELEGRAM"]
+
+[allowlist]
+paths = [
+  '''config\.yaml\.example''',
+  '''README\.md''',
+  '''CLAUDE\.md''',
+  '''values\.yaml''',
+]

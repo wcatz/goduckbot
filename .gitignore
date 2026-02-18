@@ -22,3 +22,9 @@ go.work
 config.yaml
 .env
 duckBot
+
+# Key files — never commit
+*.skey
+*.vkey
+vrf.skey
+keys/
