@@ -854,10 +854,13 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		cexplorerLink = "https://cexplorer.io/block/"
 	}
 
-	// Check if the epoch has changed
-	currentEpoch := i.getCurrentEpoch()
-	if currentEpoch != i.epoch {
-		i.epoch = currentEpoch
+	// Derive epoch from block slot (not wall clock) for correct nonce tracking.
+	// Wall clock can disagree at epoch boundaries if a late block arrives after
+	// the boundary time, which would misattribute the block's epoch and corrupt
+	// nonce evolution and TICKN η_ph (last block hash per epoch).
+	blockEpoch := SlotToEpoch(blockEvent.Context.SlotNumber, i.networkMagic)
+	if blockEpoch != i.epoch {
+		i.epoch = blockEpoch
 		i.epochBlocks = 0
 	}
 
@@ -865,7 +868,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	if i.leaderlogEnabled && vrfOutput != nil {
 		i.nonceTracker.ProcessBlock(
 			blockEvent.Context.SlotNumber,
-			i.epoch,
+			blockEpoch,
 			blockEvent.Payload.BlockHash,
 			vrfOutput,
 		)
@@ -1487,8 +1490,8 @@ func (i *Indexer) backfillSchedules(ctx context.Context) error {
 			continue
 		}
 
-		// Get nonce from DB (epoch N schedule uses nonce from epoch N-1)
-		nonce, err := i.store.GetFinalNonce(ctx, epoch-1)
+		// Get nonce for this epoch (epoch_nonces[N].final_nonce = nonce FOR epoch N)
+		nonce, err := i.store.GetFinalNonce(ctx, epoch)
 		if err != nil || nonce == nil {
 			continue // no nonce available for this epoch
 		}

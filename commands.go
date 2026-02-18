@@ -471,7 +471,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 				snap = SnapshotMark
 			case curEpoch:
 				snap = SnapshotSet
-			case curEpoch - 2:
+			case curEpoch - 1:
 				snap = SnapshotGo
 			default:
 				ntcAvailable = false
@@ -500,14 +500,24 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 
 		// Koios fallback for epochs outside NtC range or NtC failure
 		if poolStake == 0 && i.koios != nil {
-			epochNo := koios.EpochNo(targetEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr == nil && len(poolHist.Data) > 0 {
+			curEpoch := i.getCurrentEpoch()
+			for _, tryEpoch := range []int{targetEpoch, curEpoch, curEpoch - 1, curEpoch - 2} {
+				epochNo := koios.EpochNo(tryEpoch)
+				poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+				if histErr != nil || len(poolHist.Data) == 0 {
+					continue
+				}
 				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			}
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr == nil && len(epochInfo.Data) > 0 {
+				epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+				if infoErr != nil || len(epochInfo.Data) == 0 {
+					poolStake = 0
+					continue
+				}
 				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+				if tryEpoch != targetEpoch {
+					log.Printf("Using Koios stake fallback for /leaderlog %d (from epoch %d)", targetEpoch, tryEpoch)
+				}
+				break
 			}
 		}
 
@@ -586,16 +596,26 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		}
 	}
 
-	// Koios fallback if NtC unavailable or failed
+	// Koios fallback if NtC unavailable or failed (try recent epochs since Koios may lag)
 	if poolStake == 0 && i.koios != nil {
-		epochNo := koios.EpochNo(targetEpoch)
-		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-		if histErr == nil && len(poolHist.Data) > 0 {
+		curEpoch := i.getCurrentEpoch()
+		for _, tryEpoch := range []int{curEpoch, curEpoch - 1, curEpoch - 2} {
+			epochNo := koios.EpochNo(tryEpoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr != nil || len(poolHist.Data) == 0 {
+				continue
+			}
 			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-		}
-		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-		if infoErr == nil && len(epochInfo.Data) > 0 {
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr != nil || len(epochInfo.Data) == 0 {
+				poolStake = 0
+				continue
+			}
 			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			if tryEpoch != targetEpoch {
+				log.Printf("Using Koios stake fallback for /leaderlog (from epoch %d)", tryEpoch)
+			}
+			break
 		}
 	}
 
