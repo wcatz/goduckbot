@@ -123,6 +123,7 @@ type Indexer struct {
 	syncer              *ChainSyncer      // nil in lite mode
 	lastBlockTime       int64             // atomic: unix timestamp of last block received
 	historicalSyncDone  int32             // atomic: 0 = syncing, 1 = done (lite mode starts at 1)
+	leaderlogArmedAt    time.Time         // don't auto-trigger leaderlog before this time
 }
 
 // isSynced returns true when historical sync is complete (or in lite mode).
@@ -421,6 +422,7 @@ func (i *Indexer) Start() error {
 		i.leaderlogCalcing = make(map[int]bool)
 		i.leaderlogFailed = make(map[int]time.Time)
 		i.scheduleExists = make(map[int]bool)
+		i.leaderlogArmedAt = time.Now().Add(5 * time.Minute) // don't auto-post on startup
 		log.Println("Nonce tracker initialized")
 
 		// Nonce backfill runs after historical sync (see runChainTail)
@@ -1276,6 +1278,11 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	// Calculate leader schedule for next epoch after stability window
 	// Skip during historical sync — nonces aren't available yet
 	if !i.isSynced() {
+		return
+	}
+	// Startup grace period — don't auto-trigger immediately after restart
+	// to avoid computing schedules from stale/restored nonce state.
+	if time.Now().Before(i.leaderlogArmedAt) {
 		return
 	}
 	nextEpoch := i.epoch + 1
