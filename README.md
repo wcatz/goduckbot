@@ -1,5 +1,7 @@
 # duckBot
 
+<img src="logo.jpg" alt="duckBot" width="130" align="right">
+
 We call it duckBot. There is no better name, and the day is coming soon when it will be unleashed.
 
 A Cardano stake pool companion. Block notifications, leader schedule, epoch nonces, and stake queries — all from a single Go binary talking directly to your node via [gouroboros](https://github.com/blinklabs-io/gouroboros).
