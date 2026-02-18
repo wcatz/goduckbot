@@ -41,8 +41,10 @@ duck:
 
 leaderlog:
   enabled: true
-  vrfKeyPath: "/keys/vrf.skey"
+  vrfKeyValue: "5840..."     # inline CBOR hex from vrf.skey cborHex field (preferred)
+  # vrfKeyPath: "/keys/vrf.skey"  # file path (fallback, not recommended)
   timezone: "America/New_York"
+  timeFormat: "12h"           # "12h" or "24h"
 
 # Database configuration (only used when leaderlog.enabled is true)
 database:

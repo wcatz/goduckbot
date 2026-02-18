@@ -20,7 +20,7 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 
 **lite** (default) — Tails chain from tip via [adder](https://github.com/blinklabs-io/adder). Uses Koios for epoch nonces. Fast startup, minimal resources.
 
-**full** — Historical sync from Shelley genesis via gouroboros NtN ChainSync (~3,300 blocks/sec). Builds complete local nonce history. Self-computes all epoch nonces. Transitions to adder live tail once caught up.
+**full** — Historical sync from Shelley genesis via gouroboros NtN ChainSync (~1,800 avg blk/s with retries). Builds complete local nonce history. Self-computes all epoch nonces via TICKN rule. Transitions to adder live tail once caught up.
 
 ## Supported Networks
 
@@ -135,8 +135,9 @@ nodeAddress:
 
 leaderlog:
   enabled: true
-  vrfKeyPath: "/keys/vrf.skey"
+  vrfKeyValue: "5840..."     # cborHex from your vrf.skey file
   timezone: "America/New_York"
+  timeFormat: "12h"
 
 database:
   driver: "postgres"
@@ -152,7 +153,7 @@ volumes:
   - /opt/cardano/ipc:/ipc:ro
 ```
 
-Place your `vrf.skey` in a `keys/` directory next to the compose file.
+The `vrfKeyValue` is the `cborHex` field from your `vrf.skey` file (starts with `5840`, followed by 128 hex chars).
 
 ### NtC (Node-to-Client) Connection
 
@@ -280,9 +281,10 @@ Full mode achieves ~3,300 blocks/sec through a pipelined architecture:
 2. Blocks sent to buffered channel (10,000 capacity) — decouples network I/O from DB writes
 3. Batch processor drains channel (1,000 blocks or 2-second timeout)
 4. `nonce.go` ProcessBatch() evolves nonce in-memory for entire batch
-5. `db.go` persists via pgx CopyFrom (PostgreSQL COPY protocol)
+5. `db.go` persists via temp staging table + pgx CopyFrom (duplicate-safe bulk inserts)
+6. Unlimited retry with capped backoff (5s–30s) on keep-alive timeouts
 
-Full Shelley-to-tip sync: ~43 minutes for ~8.5M blocks.
+Full Shelley-to-tip sync: ~2 hours for ~8.56M blocks across 406 epochs (~1,800 avg blk/s with retries).
 
 ## Build From Source
 
@@ -314,8 +316,9 @@ Key values:
 - `config.mode` — `"lite"` or `"full"`
 - `config.duck.media` — `"gif"`, `"img"`, or `"both"`
 - `config.leaderlog.enabled` — enables VRF tracking and schedule calculation
+- `config.leaderlog.vrfKeyValue` — inline CBOR hex VRF key (preferred)
 - `config.database.driver` — `"sqlite"` or `"postgres"`
-- `vrfKey.content` — VRF signing key (mounted as K8s secret)
+- `vrfKey.secretName` — K8s secret containing vrf.skey (alternative to vrfKeyValue)
 - `persistence.enabled` — PVC for SQLite data
 
 ## Architecture
