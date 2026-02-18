@@ -550,10 +550,6 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	if !i.requireNodeQuery(m) {
-		return
-	}
-
 	// Calculate live — send progress message
 	sent, sendErr := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
 	reply := func(text string) {
@@ -570,26 +566,41 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	// Get stake from node — mark for next epoch, set for current (5min timeout)
-	ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
-	snapshots, err := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
-	ntcCancel()
-	if err != nil {
-		reply(fmt.Sprintf("Failed to get stake snapshots: %v", err))
-		return
+	// Try NtC first for stake data
+	var poolStake, totalStake uint64
+	if i.nodeQuery != nil {
+		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
+		snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
+		ntcCancel()
+		if snapErr != nil {
+			log.Printf("NtC stake query for epoch %d failed: %v", targetEpoch, snapErr)
+		} else {
+			switch snapType {
+			case SnapshotSet:
+				poolStake = snapshots.PoolStakeSet
+				totalStake = snapshots.TotalStakeSet
+			default:
+				poolStake = snapshots.PoolStakeMark
+				totalStake = snapshots.TotalStakeMark
+			}
+		}
 	}
 
-	var poolStake, totalStake uint64
-	switch snapType {
-	case SnapshotSet:
-		poolStake = snapshots.PoolStakeSet
-		totalStake = snapshots.TotalStakeSet
-	default:
-		poolStake = snapshots.PoolStakeMark
-		totalStake = snapshots.TotalStakeMark
+	// Koios fallback if NtC unavailable or failed
+	if poolStake == 0 && i.koios != nil {
+		epochNo := koios.EpochNo(targetEpoch)
+		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+		if histErr == nil && len(poolHist.Data) > 0 {
+			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+		}
+		epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+		if infoErr == nil && len(epochInfo.Data) > 0 {
+			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+		}
 	}
-	if totalStake == 0 {
-		reply("Total stake is zero")
+
+	if poolStake == 0 || totalStake == 0 {
+		reply(fmt.Sprintf("Failed to get stake for epoch %d from NtC or Koios", targetEpoch))
 		return
 	}
 
