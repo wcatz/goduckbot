@@ -8,7 +8,7 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 
 ## What It Does
 
-**Block Notifications** — Posts to Telegram and optionally Twitter/X when your pool mints a block. Includes tx count, block size, fill percentage, interval since last block, and running epoch/lifetime tallies.
+**Block Notifications** — Posts to Telegram and optionally Twitter/X when your pool forges a block. Includes tx count, block size, fill percentage, interval since last block, and running epoch/lifetime tallies.
 
 **Leader Schedule** — Pure Go CPraos implementation checking every slot per epoch against your VRF key. Calculates next epoch schedule automatically at the stability window (60% into epoch). On-demand via `/leaderlog`.
 
