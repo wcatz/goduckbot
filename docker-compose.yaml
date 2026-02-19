@@ -3,13 +3,6 @@ services:
     image: wcatz/goduckbot:${GODUCKBOT_VERSION:-latest}
     container_name: goduckbot
     restart: unless-stopped
-    environment:
-      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
-      - TWITTER_API_KEY=${TWITTER_API_KEY:-}
-      - TWITTER_API_KEY_SECRET=${TWITTER_API_KEY_SECRET:-}
-      - TWITTER_ACCESS_TOKEN=${TWITTER_ACCESS_TOKEN:-}
-      - TWITTER_ACCESS_TOKEN_SECRET=${TWITTER_ACCESS_TOKEN_SECRET:-}
-      - GODUCKBOT_DB_PASSWORD=${GODUCKBOT_DB_PASSWORD:-}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./keys:/keys:ro

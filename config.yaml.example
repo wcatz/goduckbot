@@ -22,15 +22,17 @@ networkMagic: 764824073  # mainnet. preprod is 1, preview is 2 and sancho is 4.
 
 telegram:
   enabled: true  # set to false to disable Telegram notifications
+  token: "YOUR_TELEGRAM_BOT_TOKEN"
   channel: "YOUR_TELEGRAM_CHANNEL_ID"
   allowedUsers: []     # Admin user IDs (full access to all commands)
   allowedGroups: []    # Group IDs where safe commands are allowed (e.g. [-1001234567890])
-  # token via TELEGRAM_TOKEN env var
 
 twitter:
-  enabled: false  # set to true and provide env vars to enable
-  # Credentials via env vars: TWITTER_API_KEY, TWITTER_API_KEY_SECRET,
-  # TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET
+  enabled: false  # set to true to enable Twitter/X notifications
+  apiKey: ""
+  apiKeySecret: ""
+  accessToken: ""
+  accessTokenSecret: ""
 
 # Duck media for notifications and /duck command
 duck:
@@ -55,4 +57,4 @@ database:
   port: 5432
   name: "goduckbot"
   user: "goduckbot"
-  password: ""  # Or use GODUCKBOT_DB_PASSWORD env var
+  password: ""
