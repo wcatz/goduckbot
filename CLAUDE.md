@@ -7,9 +7,11 @@ Cardano stake pool notification bot with chain sync and built-in CPraos leaderlo
 | File | Purpose |
 |------|---------|
 | `main.go` | Core: config, adder pipeline, block notifications, leaderlog orchestration, mode/social toggles, batch processing goroutine |
+| `cli.go` | CLI subcommands: `leaderlog`, `nonce`, `version`, `help` — lightweight init without daemon startup |
 | `commands.go` | Telegram bot command handlers, inline keyboard buttons (`btnLeaderlogNext`, `btnNonceNext`, `btnDuckGif`, etc.), callback routing |
-| `leaderlog.go` | CPraos leader schedule calculation, VRF key parsing, epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
+| `leaderlog.go` | CPraos leader schedule calculation, VRF key parsing (secure memory), epoch/slot math (`SlotToEpoch`, `GetEpochStartSlot`) |
 | `nonce.go` | Nonce evolution tracker (VRF accumulation per block, genesis-seeded or zero-seeded), TICKN computation, batch processing (`ProcessBatch`) |
+| `securekey.go` | Secure memory primitives: `secureAlloc` (mmap+mlock), `secureReadOnly` (mprotect), `secureFree` (zero+munmap) |
 | `store.go` | `Store` interface + SQLite implementation (`SqliteStore` via `modernc.org/sqlite`, pure Go, no CGO) |
 | `db.go` | PostgreSQL implementation (`PgStore` via `pgx/v5`) of the `Store` interface, bulk insert via staging table + CopyFrom |
 | `integrity.go` | Startup DB integrity check — FindIntersect validation + nonce repair for HA failover |
@@ -177,7 +179,7 @@ Constants defined in `leaderlog.go`: `MainnetNetworkMagic`, `PreprodNetworkMagic
 
 | Data | Source | Notes |
 |------|--------|-------|
-| VRF signing key | K8s secret or inline `vrfKeyValue` | CBOR envelope with `5840` prefix, 64-byte key |
+| VRF signing key | K8s secret or inline `vrfKeyValue` | CBOR envelope with `5840` prefix, 64-byte key, stored in secure memory (mmap+mlock+mprotect) |
 | Epoch nonce | TICKN from local data (primary), Koios (fallback) | `GetEpochParams` |
 | Pool stake | NtC LocalStateQuery (primary), Koios (fallback) | `GetPoolInfo` → `ActiveStake.IntPart()` |
 | Total stake | NtC LocalStateQuery (primary), Koios (fallback) | `GetEpochInfo` → `ActiveStake.IntPart()` |
@@ -203,15 +205,18 @@ nodeAddress:
 networkMagic: 764824073
 
 telegram:
-  enabled: true              # toggle Telegram notifications
+  enabled: true
+  token: "BOT_TOKEN"         # or TELEGRAM_TOKEN env var
   channel: "CHANNEL_ID"
   allowedUsers: [USER_ID]    # admin user IDs
   allowedGroups: [GROUP_ID]  # groups where safe commands allowed
-  # token via TELEGRAM_TOKEN env var
 
 twitter:
-  enabled: false             # toggle Twitter notifications
-  # credentials via env vars
+  enabled: false
+  apiKey: ""                 # or TWITTER_API_KEY env var
+  apiKeySecret: ""           # or TWITTER_API_KEY_SECRET env var
+  accessToken: ""            # or TWITTER_ACCESS_TOKEN env var
+  accessTokenSecret: ""      # or TWITTER_ACCESS_TOKEN_SECRET env var
 
 duck:
   media: "gif"               # "gif", "img", or "both"
@@ -231,10 +236,23 @@ database:
   port: 5432
   name: "goduckbot"
   user: "goduckbot"
-  password: ""               # Prefer GODUCKBOT_DB_PASSWORD env var
+  password: ""               # or GODUCKBOT_DB_PASSWORD env var
 ```
 
-**Note:** Database password uses `net/url.URL` for URL-safe encoding in connection strings.
+All secrets can go in `config.yaml` (gitignored) or as env vars (env vars take precedence). Database password uses `net/url.URL` for URL-safe encoding in connection strings.
+
+## CLI
+
+```bash
+goduckbot                       # Start daemon (default)
+goduckbot version               # Show version info
+goduckbot leaderlog <epoch>     # Calculate leaderlog for single epoch
+goduckbot leaderlog <N>-<M>     # Calculate leaderlog for epoch range (max 10)
+goduckbot nonce <epoch>         # Show epoch nonce
+goduckbot help                  # Show usage
+```
+
+CLI subcommands use lightweight init (`cliInit()` in `cli.go`) — reads config, opens DB, sets up Koios client and nonce tracker without starting the daemon.
 
 ## Docker Compose
 
@@ -246,11 +264,10 @@ docker compose up -d
 docker compose --profile postgres up -d
 ```
 
-Requires `.env` file with secrets (gitignored):
+Optional `.env` for docker-compose variables only (goduckbot reads config.yaml):
 ```
-GODUCKBOT_VERSION=3.0.0
-TELEGRAM_TOKEN=your_token
-GODUCKBOT_DB_PASSWORD=your_password  # only for postgres profile
+GODUCKBOT_VERSION=latest
+GODUCKBOT_DB_PASSWORD=your_password  # only for postgres profile, must match database.password
 ```
 
 ## Helm Chart (v0.7.16)

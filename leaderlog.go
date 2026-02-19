@@ -71,10 +71,58 @@ type LeaderSchedule struct {
 	CalculatedAt  time.Time    `json:"calculatedAt"`
 }
 
-// VRFKey holds the parsed VRF signing key
+// VRFKey holds the parsed VRF signing key in secure memory.
+// The key material is allocated via mmap outside the Go heap,
+// locked into RAM (mlock), and marked read-only (mprotect).
+// Call Close() to zero and release the secure memory.
 type VRFKey struct {
-	PrivateKey []byte // 32 bytes
-	PublicKey  []byte // 32 bytes
+	PrivateKey []byte // 32 bytes (read-only, mlock'd, non-swappable)
+	PublicKey  []byte // 32 bytes (read-only, mlock'd, non-swappable)
+	secureMem  []byte // backing mmap allocation (nil if fallback to heap)
+}
+
+// Close zeros and releases the secure memory backing this key.
+func (k *VRFKey) Close() {
+	if k.secureMem != nil {
+		secureFree(k.secureMem)
+		k.secureMem = nil
+		k.PrivateKey = nil
+		k.PublicKey = nil
+	}
+}
+
+// newVRFKeyFromBytes creates a VRFKey from 64 raw bytes, using secure memory.
+// Falls back to heap allocation if secure memory is unavailable.
+func newVRFKeyFromBytes(keyBytes []byte) (*VRFKey, error) {
+	if len(keyBytes) != 64 {
+		return nil, fmt.Errorf("expected 64 bytes, got %d", len(keyBytes))
+	}
+
+	mem, err := secureAlloc(64)
+	if err != nil {
+		// Fallback: heap allocation (still functional, just not mlock'd)
+		priv := make([]byte, 32)
+		pub := make([]byte, 32)
+		copy(priv, keyBytes[:32])
+		copy(pub, keyBytes[32:])
+		return &VRFKey{PrivateKey: priv, PublicKey: pub}, nil
+	}
+
+	copy(mem, keyBytes)
+	// Zero the source material
+	for i := range keyBytes {
+		keyBytes[i] = 0
+	}
+	if err := secureReadOnly(mem); err != nil {
+		secureFree(mem)
+		return nil, fmt.Errorf("mprotect: %w", err)
+	}
+
+	return &VRFKey{
+		PrivateKey: mem[:32],
+		PublicKey:  mem[32:64],
+		secureMem:  mem,
+	}, nil
 }
 
 // ParseVRFKeyFile reads and parses a Cardano vrf.skey file
@@ -101,28 +149,19 @@ func ParseVRFKeyFile(path string) (*VRFKey, error) {
 		return nil, fmt.Errorf("unexpected CBOR prefix: expected '5840', got %q", envelope.CborHex[:min(4, len(envelope.CborHex))])
 	}
 
-	// Strip CBOR prefix and decode
-	keyHex := envelope.CborHex[4:] // Remove "5840" prefix
+	keyHex := envelope.CborHex[4:]
 	keyBytes, err := hex.DecodeString(keyHex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode key hex: %w", err)
 	}
 
-	if len(keyBytes) != 64 {
-		return nil, fmt.Errorf("expected 64 bytes, got %d", len(keyBytes))
-	}
-
-	return &VRFKey{
-		PrivateKey: keyBytes[:32],
-		PublicKey:  keyBytes[32:],
-	}, nil
+	return newVRFKeyFromBytes(keyBytes)
 }
 
 // ParseVRFKeyCborHex parses a VRF key directly from its CBOR hex string.
 // Accepts with or without the "5840" CBOR prefix.
 func ParseVRFKeyCborHex(cborHex string) (*VRFKey, error) {
 	cborHex = strings.TrimSpace(cborHex)
-	// Strip "5840" CBOR prefix if present
 	if len(cborHex) >= 4 && cborHex[:4] == "5840" {
 		cborHex = cborHex[4:]
 	}
@@ -132,14 +171,7 @@ func ParseVRFKeyCborHex(cborHex string) (*VRFKey, error) {
 		return nil, fmt.Errorf("failed to decode VRF CBOR hex: %w", err)
 	}
 
-	if len(keyBytes) != 64 {
-		return nil, fmt.Errorf("expected 64 bytes, got %d", len(keyBytes))
-	}
-
-	return &VRFKey{
-		PrivateKey: keyBytes[:32],
-		PublicKey:  keyBytes[32:],
-	}, nil
+	return newVRFKeyFromBytes(keyBytes)
 }
 
 // mkInputVrf creates VRF input: BLAKE2b-256(slot || epochNonce)

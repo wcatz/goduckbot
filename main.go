@@ -138,11 +138,11 @@ type BlockEvent struct {
 	Payload   event.BlockEvent   `json:"payload"`
 }
 
-// getCurrentEpoch calculates the current epoch number based on networkMagic.
-func (i *Indexer) getCurrentEpoch() int {
+// calcCurrentEpoch calculates the current epoch for a network using wall clock time.
+func calcCurrentEpoch(networkMagic int) int {
 	now := time.Now().UTC()
 
-	switch i.networkMagic {
+	switch networkMagic {
 	case PreprodNetworkMagic:
 		genesis, _ := time.Parse(time.RFC3339, "2022-06-01T00:00:00Z")
 		elapsed := now.Sub(genesis).Seconds()
@@ -166,6 +166,10 @@ func (i *Indexer) getCurrentEpoch() int {
 	}
 }
 
+func (i *Indexer) getCurrentEpoch() int {
+	return calcCurrentEpoch(i.networkMagic)
+}
+
 // initStore creates the appropriate Store based on config.
 func initStore() (Store, error) {
 	driver := viper.GetString("database.driver")
@@ -186,13 +190,7 @@ func initStore() (Store, error) {
 		dbPort := viper.GetInt("database.port")
 		dbName := viper.GetString("database.name")
 		dbUser := viper.GetString("database.user")
-		dbPassword := os.Getenv("GODUCKBOT_DB_PASSWORD")
-		if dbPassword == "" {
-			dbPassword = viper.GetString("database.password")
-			if dbPassword != "" {
-				log.Println("WARNING: using database password from config file; prefer GODUCKBOT_DB_PASSWORD env var")
-			}
-		}
+		dbPassword := envOrConfig("GODUCKBOT_DB_PASSWORD", "database.password")
 
 		connURL := &url.URL{
 			Scheme:   "postgres",
@@ -234,6 +232,9 @@ func (i *Indexer) Start() error {
 	i.poolName = viper.GetString("poolName")
 	i.telegramChannel = viper.GetString("telegram.channel")
 	i.telegramToken = os.Getenv("TELEGRAM_TOKEN")
+	if i.telegramToken == "" {
+		i.telegramToken = viper.GetString("telegram.token")
+	}
 	i.image = viper.GetString("image")
 	i.networkMagic = viper.GetInt("networkMagic")
 	i.duckMedia = viper.GetString("duck.media")
@@ -318,10 +319,10 @@ func (i *Indexer) Start() error {
 	}
 
 	if twitterConfigEnabled {
-		twitterAPIKey := os.Getenv("TWITTER_API_KEY")
-		twitterAPISecret := os.Getenv("TWITTER_API_KEY_SECRET")
-		twitterAccessToken := os.Getenv("TWITTER_ACCESS_TOKEN")
-		twitterAccessTokenSecret := os.Getenv("TWITTER_ACCESS_TOKEN_SECRET")
+		twitterAPIKey := envOrConfig("TWITTER_API_KEY", "twitter.apiKey")
+		twitterAPISecret := envOrConfig("TWITTER_API_KEY_SECRET", "twitter.apiKeySecret")
+		twitterAccessToken := envOrConfig("TWITTER_ACCESS_TOKEN", "twitter.accessToken")
+		twitterAccessTokenSecret := envOrConfig("TWITTER_ACCESS_TOKEN_SECRET", "twitter.accessTokenSecret")
 
 		if twitterAPIKey != "" && twitterAPISecret != "" &&
 			twitterAccessToken != "" && twitterAccessTokenSecret != "" {
@@ -1645,8 +1646,21 @@ func formatNumber(n int64) string {
 	return string(result)
 }
 
+// envOrConfig returns the value of the environment variable if set,
+// otherwise falls back to the viper config key.
+func envOrConfig(envKey, viperKey string) string {
+	if v := os.Getenv(envKey); v != "" {
+		return v
+	}
+	return viper.GetString(viperKey)
+}
+
 // Main function to start goduckbot
 func main() {
+	// CLI subcommand dispatch — runs and exits if a subcommand is given
+	if len(os.Args) > 1 {
+		os.Exit(runCLI(os.Args[1:]))
+	}
 
 	// Configure websocket route and start broadcast handler BEFORE Start()
 	// (Start blocks in full mode; broadcast channel must be drained)
