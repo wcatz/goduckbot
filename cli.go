@@ -185,6 +185,9 @@ func parseEpochArg(arg string) ([]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid epoch %q", arg)
 	}
+	if n < 0 {
+		return nil, fmt.Errorf("epoch must be non-negative, got %d", n)
+	}
 	return []int{n}, nil
 }
 

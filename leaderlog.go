@@ -81,14 +81,22 @@ type VRFKey struct {
 	secureMem  []byte // backing mmap allocation (nil if fallback to heap)
 }
 
-// Close zeros and releases the secure memory backing this key.
+// Close zeros and releases the memory backing this key.
 func (k *VRFKey) Close() {
 	if k.secureMem != nil {
 		secureFree(k.secureMem)
 		k.secureMem = nil
-		k.PrivateKey = nil
-		k.PublicKey = nil
+	} else {
+		// Heap fallback: zero key material manually
+		for i := range k.PrivateKey {
+			k.PrivateKey[i] = 0
+		}
+		for i := range k.PublicKey {
+			k.PublicKey[i] = 0
+		}
 	}
+	k.PrivateKey = nil
+	k.PublicKey = nil
 }
 
 // newVRFKeyFromBytes creates a VRFKey from 64 raw bytes, using secure memory.

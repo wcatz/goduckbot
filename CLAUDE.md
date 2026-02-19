@@ -265,9 +265,9 @@ docker compose --profile postgres up -d
 ```
 
 Optional `.env` for docker-compose variables only (goduckbot reads config.yaml):
-```
+```env
 GODUCKBOT_VERSION=latest
-GODUCKBOT_DB_PASSWORD=your_password  # only for postgres profile, must match database.password
+GODUCKBOT_DB_PASSWORD=your_password  # only for postgres profile, overrides database.password
 ```
 
 ## Helm Chart (v0.7.16)
