@@ -48,6 +48,12 @@ const (
 
 	// PreprodBabbageStartEpoch is the first Babbage epoch on preprod
 	PreprodBabbageStartEpoch = 12
+
+	// ConwayStartEpoch is the first Conway epoch on mainnet (Chang hard fork)
+	ConwayStartEpoch = 507
+
+	// PreprodConwayStartEpoch is the first Conway epoch on preprod
+	PreprodConwayStartEpoch = 163
 )
 
 // LeaderSlot represents an assigned slot in the schedule
@@ -335,31 +341,38 @@ func GetEpochLength(networkMagic int) uint64 {
 	return MainnetEpochLength
 }
 
-// StabilityWindowSlots returns the CPraos stability window (current era).
+// StabilityWindowSlots returns the nonce stabilisation window for the current era (Conway).
 // Use StabilityWindowSlotsForEpoch for historical computation.
 func StabilityWindowSlots(networkMagic int) uint64 {
-	return StabilityWindowSlotsForEpoch(BabbageStartEpoch, networkMagic)
+	return StabilityWindowSlotsForEpoch(ConwayStartEpoch, networkMagic)
 }
 
-// StabilityWindowSlotsForEpoch returns the era-correct stability window.
-// TPraos (Shelley-Alonzo): 3k/f = 129600 margin → freeze at 302400 (70%)
-// CPraos (Babbage+): 4k/f = 172800 margin → freeze at 259200 (60%)
+// StabilityWindowSlotsForEpoch returns the era-correct randomness stabilisation window.
+// This controls WHEN the candidate nonce is frozen during each epoch.
+//
+// From ouroboros-consensus Node.hs:
+//   - Babbage uses computeStabilityWindow (3k/f) for praosRandomnessStabilisationWindow
+//     (backward compat, erratum 17.3 in Shelley ledger specs)
+//   - Conway+ uses computeRandomnessStabilisationWindow (4k/f)
+//
+// Shelley-Babbage: 3k/f = 129600 margin → freeze at 302400 (70% of epoch)
+// Conway+:         4k/f = 172800 margin → freeze at 259200 (60% of epoch)
 func StabilityWindowSlotsForEpoch(epoch, networkMagic int) uint64 {
 	epochLen := GetEpochLength(networkMagic)
-	babbageStart := BabbageStartEpoch
+	conwayStart := ConwayStartEpoch
 	if networkMagic == PreprodNetworkMagic {
-		babbageStart = PreprodBabbageStartEpoch
+		conwayStart = PreprodConwayStartEpoch
 	}
 
 	var margin uint64
-	if epoch >= babbageStart {
-		margin = 172800 // 4k/f (CPraos)
+	if epoch >= conwayStart {
+		margin = 172800 // 4k/f (Conway+: computeRandomnessStabilisationWindow)
 	} else {
-		margin = 129600 // 3k/f (TPraos)
+		margin = 129600 // 3k/f (Shelley-Babbage: computeStabilityWindow)
 	}
 
 	if epochLen <= margin {
-		if epoch >= babbageStart {
+		if epoch >= conwayStart {
 			return epochLen * 60 / 100
 		}
 		return epochLen * 70 / 100

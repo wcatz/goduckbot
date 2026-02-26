@@ -20,9 +20,13 @@ import (
 // Used as the initial eta_v seed for full chain sync nonce evolution.
 const ShelleyGenesisHash = "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81"
 
-// knownEpochNonces is empty — self-computation from genesis produces correct
-// nonces for all epochs including early Shelley (verified against Koios).
-var knownEpochNonces = map[int]string{}
+// knownEpochNonces overrides self-computed nonces for epochs that require
+// protocol parameters we don't track (e.g., extra_entropy).
+// Epoch 259: the only mainnet epoch with extra_entropy set
+// (d982e06fd33e7440b43cefad529b7ecafbaa255e38178ad4189a37e4ce9bf1fa).
+var knownEpochNonces = map[int]string{
+	259: "0022cfa563a5328c4fb5c8017121329e964c26ade5d167b1bd9b2ec967772b60",
+}
 
 // NonceTracker accumulates VRF nonce contributions from chain sync blocks
 // and evolves the epoch nonce for leader schedule calculation.
@@ -600,8 +604,7 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 				copy(lastEpochBlockNonce, labNonce)
 			}
 
-			// Verify against Koios — use Koios value on mismatch (workaround for
-			// gouroboros VRF data divergence in Babbage-era blocks).
+			// Verify against Koios — use Koios value on mismatch.
 			if nt.koiosClient != nil {
 				koiosCtx, koiosCancel := context.WithTimeout(ctx, 10*time.Second)
 				koiosNonce, koiosErr := nt.fetchNonceFromKoios(koiosCtx, epoch)
