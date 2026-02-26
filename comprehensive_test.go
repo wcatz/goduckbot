@@ -211,32 +211,48 @@ func TestStabilityWindowAllEras(t *testing.T) {
 		}
 	}
 
-	// CPraos epochs (Babbage+): 4k/f = 172800 margin → 259200
-	cpraosEpochs := []int{365, 400, 500, 600}
-	for _, e := range cpraosEpochs {
+	// Babbage epochs: still 3k/f (computeStabilityWindow, not computeRandomnessStabilisationWindow)
+	babbageEpochs := []int{365, 400, 500, 506}
+	for _, e := range babbageEpochs {
 		got := StabilityWindowSlotsForEpoch(e, MainnetNetworkMagic)
-		if got != 259200 {
-			t.Errorf("epoch %d (CPraos): got %d, want 259200", e, got)
+		if got != 302400 {
+			t.Errorf("epoch %d (Babbage): got %d, want 302400", e, got)
 		}
 	}
 
-	// Preprod transition
+	// Conway epochs (507+): 4k/f = 172800 margin → 259200
+	conwayEpochs := []int{507, 508, 600}
+	for _, e := range conwayEpochs {
+		got := StabilityWindowSlotsForEpoch(e, MainnetNetworkMagic)
+		if got != 259200 {
+			t.Errorf("epoch %d (Conway): got %d, want 259200", e, got)
+		}
+	}
+
+	// Preprod transitions: TPraos → Babbage → Conway
 	if got := StabilityWindowSlotsForEpoch(11, PreprodNetworkMagic); got != 302400 {
 		t.Errorf("preprod epoch 11 (TPraos): got %d, want 302400", got)
 	}
-	if got := StabilityWindowSlotsForEpoch(12, PreprodNetworkMagic); got != 259200 {
-		t.Errorf("preprod epoch 12 (CPraos): got %d, want 259200", got)
+	if got := StabilityWindowSlotsForEpoch(12, PreprodNetworkMagic); got != 302400 {
+		t.Errorf("preprod epoch 12 (Babbage): got %d, want 302400", got)
+	}
+	if got := StabilityWindowSlotsForEpoch(162, PreprodNetworkMagic); got != 302400 {
+		t.Errorf("preprod epoch 162 (Babbage): got %d, want 302400", got)
+	}
+	if got := StabilityWindowSlotsForEpoch(163, PreprodNetworkMagic); got != 259200 {
+		t.Errorf("preprod epoch 163 (Conway): got %d, want 259200", got)
 	}
 
-	// Preview — smaller epoch, uses percentage (70% because epoch 0 < BabbageStartEpoch)
+	// Preview — smaller epoch, uses percentage (70% for pre-Conway)
 	got := StabilityWindowSlotsForEpoch(0, PreviewNetworkMagic)
 	if got != 60480 { // 86400 * 70 / 100
 		t.Errorf("preview epoch 0: got %d, want 60480", got)
 	}
-	// Preview epoch 365+ would use 60%
-	got = StabilityWindowSlotsForEpoch(365, PreviewNetworkMagic)
+	// Preview doesn't have a Conway transition constant, but epoch 507+ would use 60%
+	// (preview uses mainnet ConwayStartEpoch since no PreviewConwayStartEpoch is defined)
+	got = StabilityWindowSlotsForEpoch(507, PreviewNetworkMagic)
 	if got != 51840 { // 86400 * 60 / 100
-		t.Errorf("preview epoch 365: got %d, want 51840", got)
+		t.Errorf("preview epoch 507: got %d, want 51840", got)
 	}
 }
 

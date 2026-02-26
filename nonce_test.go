@@ -159,11 +159,20 @@ func TestStabilityWindowTPraos(t *testing.T) {
 	}
 }
 
-func TestStabilityWindowCPraos(t *testing.T) {
-	// Epoch 365 (Babbage/CPraos): 4k/f = 172800 margin → freeze at 259200
+func TestStabilityWindowBabbage(t *testing.T) {
+	// Epoch 365 (Babbage): still 3k/f = 129600 margin → freeze at 302400
+	// Babbage uses computeStabilityWindow (3k/f), NOT computeRandomnessStabilisationWindow (4k/f)
 	got := StabilityWindowSlotsForEpoch(365, MainnetNetworkMagic)
+	if got != 302400 {
+		t.Fatalf("Babbage stability window: got %d, want 302400", got)
+	}
+}
+
+func TestStabilityWindowConway(t *testing.T) {
+	// Epoch 507 (Conway): 4k/f = 172800 margin → freeze at 259200
+	got := StabilityWindowSlotsForEpoch(507, MainnetNetworkMagic)
 	if got != 259200 {
-		t.Fatalf("CPraos stability window: got %d, want 259200", got)
+		t.Fatalf("Conway stability window: got %d, want 259200", got)
 	}
 }
 
