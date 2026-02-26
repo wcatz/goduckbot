@@ -506,6 +506,25 @@ func (s *PgStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]by
 	return values, rows.Err()
 }
 
+func (s *PgStore) GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT epoch, vrf_output FROM blocks WHERE epoch = $1 ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var blocks []VrfBlock
+	for rows.Next() {
+		var b VrfBlock
+		if err := rows.Scan(&b.Epoch, &b.VrfOutput); err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, b)
+	}
+	return blocks, rows.Err()
+}
+
 func (s *PgStore) GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error) {
 	var nonce []byte
 	err := s.pool.QueryRow(ctx,
@@ -520,6 +539,19 @@ func (s *PgStore) GetLastBlockHashForEpoch(ctx context.Context, epoch int) (stri
 	var hash string
 	err := s.pool.QueryRow(ctx,
 		`SELECT block_hash FROM blocks WHERE epoch = $1 ORDER BY slot DESC LIMIT 1`, epoch).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+// GetPrevHashOfLastBlock returns the block hash of the second-to-last block
+// in the given epoch. This is the prevHash of the last block, which is what
+// the Cardano node uses for praosStateLabNonce (η_ph in the TICKN rule).
+func (s *PgStore) GetPrevHashOfLastBlock(ctx context.Context, epoch int) (string, error) {
+	var hash string
+	err := s.pool.QueryRow(ctx,
+		`SELECT block_hash FROM blocks WHERE epoch = $1 ORDER BY slot DESC LIMIT 1 OFFSET 1`, epoch).Scan(&hash)
 	if err != nil {
 		return "", err
 	}

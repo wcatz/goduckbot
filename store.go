@@ -59,8 +59,10 @@ type Store interface {
 	GetLastNBlocks(ctx context.Context, n int) ([]BlockRecord, error)
 	GetBlockCountForEpoch(ctx context.Context, epoch int) (int, error)
 	GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error)
+	GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error)
 	GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error)
 	GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error)
+	GetPrevHashOfLastBlock(ctx context.Context, epoch int) (string, error)
 	TruncateAll(ctx context.Context) error
 	Close() error
 }
@@ -70,6 +72,12 @@ type BlockRecord struct {
 	Slot      uint64
 	Epoch     int
 	BlockHash string
+}
+
+// VrfBlock holds the raw VRF output and epoch for a block, used for nonce recomputation.
+type VrfBlock struct {
+	Epoch     int
+	VrfOutput []byte
 }
 
 // SqliteStore implements Store using SQLite via modernc.org/sqlite (pure Go, no CGO).
@@ -563,6 +571,25 @@ func (s *SqliteStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([]
 	return values, rows.Err()
 }
 
+func (s *SqliteStore) GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT epoch, vrf_output FROM blocks WHERE epoch = ? ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var blocks []VrfBlock
+	for rows.Next() {
+		var b VrfBlock
+		if err := rows.Scan(&b.Epoch, &b.VrfOutput); err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, b)
+	}
+	return blocks, rows.Err()
+}
+
 func (s *SqliteStore) GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error) {
 	var nonce []byte
 	err := s.db.QueryRowContext(ctx,
@@ -577,6 +604,19 @@ func (s *SqliteStore) GetLastBlockHashForEpoch(ctx context.Context, epoch int) (
 	var hash string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT block_hash FROM blocks WHERE epoch = ? ORDER BY slot DESC LIMIT 1`, epoch).Scan(&hash)
+	if err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+// GetPrevHashOfLastBlock returns the block hash of the second-to-last block
+// in the given epoch. This is the prevHash of the last block, which is what
+// the Cardano node uses for praosStateLabNonce (η_ph in the TICKN rule).
+func (s *SqliteStore) GetPrevHashOfLastBlock(ctx context.Context, epoch int) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT block_hash FROM blocks WHERE epoch = ? ORDER BY slot DESC LIMIT 1 OFFSET 1`, epoch).Scan(&hash)
 	if err != nil {
 		return "", err
 	}
