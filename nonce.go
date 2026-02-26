@@ -172,6 +172,22 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 		return
 	}
 
+	// Freeze candidate nonce at the stability window BEFORE evolving,
+	// matching ComputeEpochNonce and the Cardano node's behavior where
+	// η_c is the evolving nonce just before the first post-stability block.
+	if !nt.candidateFroze {
+		epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
+		stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(epoch, nt.networkMagic)
+		if slot >= stabilitySlot {
+			nt.candidateFroze = true
+			if storeErr := nt.store.SetCandidateNonce(ctx, epoch, nt.evolvingNonce); storeErr != nil {
+				log.Printf("Failed to freeze candidate nonce for epoch %d: %v", epoch, storeErr)
+			} else {
+				log.Printf("Froze candidate nonce for epoch %d (block count: %d)", epoch, nt.blockCount)
+			}
+		}
+	}
+
 	// Update evolving nonce
 	nt.evolvingNonce = evolveNonce(nt.evolvingNonce, nonceValue)
 	nt.blockCount++
@@ -270,50 +286,31 @@ func (nt *NonceTracker) RecomputeCurrentEpochNonce(ctx context.Context, epoch in
 		log.Printf("RecomputeCurrentEpochNonce: no previous epoch nonce, using initial seed")
 	}
 
-	// Stream nonce values for this epoch's blocks and re-evolve
-	nonceValues, err := nt.store.GetNonceValuesForEpoch(ctx, epoch)
+	// Stream raw VRF outputs for this epoch's blocks and recompute nonce values.
+	// Don't trust stored nonce_value — recompute from vrf_output for correctness.
+	vrfBlocks, err := nt.store.GetVrfOutputsForEpoch(ctx, epoch)
 	if err != nil {
 		return fmt.Errorf("querying blocks for epoch %d: %w", epoch, err)
 	}
 
-	for _, nv := range nonceValues {
-		etaV = evolveNonce(etaV, nv)
+	for _, b := range vrfBlocks {
+		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, nt.networkMagic)
+		etaV = evolveNonce(etaV, nonceValue)
 	}
 
 	// Persist corrected nonce
-	if err := nt.store.UpsertEvolvingNonce(ctx, epoch, etaV, len(nonceValues)); err != nil {
+	if err := nt.store.UpsertEvolvingNonce(ctx, epoch, etaV, len(vrfBlocks)); err != nil {
 		return fmt.Errorf("persisting recomputed nonce for epoch %d: %w", epoch, err)
 	}
 
 	// Update in-memory state
 	nt.evolvingNonce = etaV
 	nt.currentEpoch = epoch
-	nt.blockCount = len(nonceValues)
+	nt.blockCount = len(vrfBlocks)
 	nt.candidateFroze = false
 
-	log.Printf("RecomputeCurrentEpochNonce: epoch %d recomputed from %d blocks", epoch, len(nonceValues))
+	log.Printf("RecomputeCurrentEpochNonce: epoch %d recomputed from %d blocks (raw VRF)", epoch, len(vrfBlocks))
 	return nil
-}
-
-// FreezeCandidate freezes the candidate nonce at the stability window.
-func (nt *NonceTracker) FreezeCandidate(epoch int) {
-	nt.mu.Lock()
-	defer nt.mu.Unlock()
-
-	if nt.candidateFroze || epoch != nt.currentEpoch {
-		return
-	}
-
-	nt.candidateFroze = true
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := nt.store.SetCandidateNonce(ctx, epoch, nt.evolvingNonce); err != nil {
-		log.Printf("Failed to freeze candidate nonce for epoch %d: %v", epoch, err)
-	} else {
-		log.Printf("Froze candidate nonce for epoch %d (block count: %d)", epoch, nt.blockCount)
-	}
 }
 
 // GetNonceForEpoch returns the epoch nonce. Priority:
@@ -359,11 +356,14 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 
 	// Full mode: compute next epoch nonce from frozen candidate + η_ph (TICKN rule).
 	// At 60% of epoch N, we need epoch N+1's nonce (not yet on Koios).
-	// epochNonce = BLAKE2b-256(candidateNonce_N || lastBlockHash_of_epoch_N-1)
+	// epochNonce(N+1) = BLAKE2b-256(η_c(N) || η_ph)
+	// where η_ph = praosStateLastEpochBlockNonce = prevHash of the last block
+	// of epoch N-1 = hash of the second-to-last block of epoch N-1.
 	if nt.fullMode {
 		candidateEpoch := epoch - 1
+		etaPhEpoch := candidateEpoch - 1
 		log.Printf("TICKN: attempting to compute epoch %d nonce from candidate(%d) + η_ph(%d)",
-			epoch, candidateEpoch, candidateEpoch-1)
+			epoch, candidateEpoch, etaPhEpoch)
 		candidate, candErr := nt.store.GetCandidateNonce(ctx, candidateEpoch)
 		if candErr != nil {
 			log.Printf("TICKN: GetCandidateNonce(%d) failed: %v", candidateEpoch, candErr)
@@ -371,19 +371,20 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 			log.Printf("TICKN: GetCandidateNonce(%d) returned nil", candidateEpoch)
 		} else {
 			log.Printf("TICKN: got candidate for epoch %d: %s", candidateEpoch, hex.EncodeToString(candidate))
-			// Try DB first, fall back to Koios blocks API for η_ph
-			prevEpochHash, hashErr := nt.store.GetLastBlockHashForEpoch(ctx, candidateEpoch-1)
-			if hashErr != nil || prevEpochHash == "" {
-				log.Printf("TICKN: DB has no blocks for epoch %d, trying Koios", candidateEpoch-1)
-				prevEpochHash, hashErr = nt.fetchLastBlockHashFromKoios(ctx, candidateEpoch-1)
+			// η_ph = prevHash of the last block of etaPhEpoch = hash of second-to-last block.
+			// This matches how ComputeEpochNonce tracks labNonce via prevBlockHash.
+			etaPh, hashErr := nt.store.GetPrevHashOfLastBlock(ctx, etaPhEpoch)
+			if hashErr != nil || etaPh == "" {
+				// Fallback: try GetLastBlockHashForEpoch from the epoch BEFORE etaPhEpoch.
+				// If the epoch only had 1 block, second-to-last doesn't exist.
+				// In that edge case the labNonce at the transition would be from an earlier epoch.
+				log.Printf("TICKN: no second-to-last block for epoch %d, trying Koios for full nonce", etaPhEpoch)
 			}
-			if hashErr != nil {
-				log.Printf("TICKN: failed to get η_ph for epoch %d: %v", candidateEpoch-1, hashErr)
-			} else if prevEpochHash != "" {
-				hashBytes, _ := hex.DecodeString(prevEpochHash)
+			if hashErr == nil && etaPh != "" {
+				hashBytes, _ := hex.DecodeString(etaPh)
 				nonce = hashConcat(candidate, hashBytes)
 				log.Printf("Computed epoch %d nonce from candidate(%d) + η_ph(%d): %s",
-					epoch, candidateEpoch, candidateEpoch-1, hex.EncodeToString(nonce))
+					epoch, candidateEpoch, etaPhEpoch, hex.EncodeToString(nonce))
 				if storeErr := nt.store.SetFinalNonce(ctx, epoch, nonce, "computed"); storeErr != nil {
 					log.Printf("Failed to cache computed nonce for epoch %d: %v", epoch, storeErr)
 				}

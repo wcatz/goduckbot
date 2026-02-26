@@ -1271,10 +1271,8 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	stabilitySlot := epochStartSlot + StabilityWindowSlots(i.networkMagic)
 	pastStability := slot >= stabilitySlot
 
-	// Freeze candidate nonce at stability window
-	if pastStability {
-		i.nonceTracker.FreezeCandidate(i.epoch)
-	}
+	// Candidate nonce is now frozen inside ProcessBlock (before nonce evolution)
+	// to match ComputeEpochNonce's behavior. No separate FreezeCandidate call needed.
 
 	// Calculate leader schedule for next epoch after stability window
 	// Skip during historical sync — nonces aren't available yet
