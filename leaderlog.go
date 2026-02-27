@@ -425,8 +425,8 @@ func FormatScheduleForTelegram(schedule *LeaderSchedule, poolName, timezone, tim
 
 	msg := fmt.Sprintf("Epoch: %d\n", schedule.Epoch)
 	msg += fmt.Sprintf("Nonce: %s\n", schedule.EpochNonce)
-	msg += fmt.Sprintf("Pool Active Stake:  %s\u20B3\n", formatNumber(int64(schedule.PoolStake)))
-	msg += fmt.Sprintf("Network Active Stake: %s\u20B3\n", formatNumber(int64(schedule.TotalStake)))
+	msg += fmt.Sprintf("Pool Active Stake:  %s\u20B3\n", formatADA(schedule.PoolStake))
+	msg += fmt.Sprintf("Network Active Stake: %s\u20B3\n", formatADA(schedule.TotalStake))
 	msg += fmt.Sprintf("Ideal Blocks: %.2f\n\n", schedule.IdealSlots)
 
 	if len(schedule.AssignedSlots) > 0 {

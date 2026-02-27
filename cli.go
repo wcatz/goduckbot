@@ -350,8 +350,8 @@ func formatScheduleForCLI(schedule *LeaderSchedule, poolName, timezone, timeForm
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Epoch: %d\n", schedule.Epoch)
 	fmt.Fprintf(&sb, "Nonce: %s\n", schedule.EpochNonce)
-	fmt.Fprintf(&sb, "Pool Active Stake:    %s\n", formatNumber(int64(schedule.PoolStake)))
-	fmt.Fprintf(&sb, "Network Active Stake: %s\n", formatNumber(int64(schedule.TotalStake)))
+	fmt.Fprintf(&sb, "Pool Active Stake:    %s\u20B3\n", formatADA(schedule.PoolStake))
+	fmt.Fprintf(&sb, "Network Active Stake: %s\u20B3\n", formatADA(schedule.TotalStake))
 	fmt.Fprintf(&sb, "Ideal Blocks: %.2f\n", schedule.IdealSlots)
 
 	if len(schedule.AssignedSlots) > 0 {

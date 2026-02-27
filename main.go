@@ -1644,6 +1644,13 @@ func formatNumber(n int64) string {
 	return string(result)
 }
 
+// formatADA converts lovelace to ADA with comma-separated whole part and 2 decimal places.
+func formatADA(lovelace uint64) string {
+	whole := lovelace / 1_000_000
+	frac := lovelace % 1_000_000
+	return fmt.Sprintf("%s.%02d", formatNumber(int64(whole)), frac/10_000)
+}
+
 // envOrConfig returns the value of the environment variable if set,
 // otherwise falls back to the viper config key.
 func envOrConfig(envKey, viperKey string) string {
