@@ -333,6 +333,9 @@ func (i *Indexer) Start() error {
 				OAuthTokenSecret:     twitterAccessTokenSecret,
 				APIKey:               twitterAPIKey,
 				APIKeySecret:         twitterAPISecret,
+				HTTPClient: &http.Client{
+					Transport: &xAPITransport{Base: http.DefaultTransport},
+				},
 			}
 			i.twitterClient, err = gotwi.NewClient(in)
 			if err != nil {
@@ -1642,6 +1645,20 @@ func formatNumber(n int64) string {
 		result = append(result, byte(c))
 	}
 	return string(result)
+}
+
+// xAPITransport rewrites api.twitter.com to api.x.com to bypass Cloudflare blocks.
+type xAPITransport struct {
+	Base http.RoundTripper
+}
+
+func (t *xAPITransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == "api.twitter.com" {
+		req = req.Clone(req.Context())
+		req.URL.Host = "api.x.com"
+		req.Host = "api.x.com"
+	}
+	return t.Base.RoundTrip(req)
 }
 
 // formatADA converts lovelace to ADA with comma-separated whole part and 2 decimal places.
