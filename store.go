@@ -63,6 +63,10 @@ type Store interface {
 	GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error)
 	GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error)
 	GetPrevHashOfLastBlock(ctx context.Context, epoch int) (string, error)
+	UpsertSlotOutcomes(ctx context.Context, epoch int, outcomes []SlotOutcome) error
+	GetSlotOutcomes(ctx context.Context, epoch int) ([]SlotOutcome, error)
+	IsEpochClassified(ctx context.Context, epoch int) bool
+	MarkEpochClassified(ctx context.Context, epoch int) error
 	TruncateAll(ctx context.Context) error
 	Close() error
 }
@@ -78,6 +82,14 @@ type BlockRecord struct {
 type VrfBlock struct {
 	Epoch     int
 	VrfOutput []byte
+}
+
+// SlotOutcome records the classification of an assigned leader slot.
+type SlotOutcome struct {
+	Epoch    int    `json:"epoch"`
+	Slot     uint64 `json:"slot"`
+	Outcome  string `json:"outcome"`  // "forged", "battle", "missed"
+	Opponent string `json:"opponent"` // bech32 pool ID (battle only)
 }
 
 // SqliteStore implements Store using SQLite via modernc.org/sqlite (pure Go, no CGO).
@@ -117,8 +129,18 @@ CREATE TABLE IF NOT EXISTS leader_schedules (
     performance    REAL,
     slots          TEXT DEFAULT '[]',
     posted         INTEGER DEFAULT 0,
+    history_classified INTEGER DEFAULT 0,
     calculated_at  TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS slot_outcomes (
+    epoch    INTEGER NOT NULL,
+    slot     INTEGER NOT NULL,
+    outcome  TEXT NOT NULL,
+    opponent TEXT,
+    PRIMARY KEY (epoch, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_slot_outcomes_epoch ON slot_outcomes(epoch);
 `
 
 // NewSqliteStore opens (or creates) a SQLite database at the given path.
@@ -139,6 +161,9 @@ func NewSqliteStore(path string) (*SqliteStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("creating sqlite schema: %w", err)
 	}
+
+	// Migrations for existing databases
+	db.Exec(`ALTER TABLE leader_schedules ADD COLUMN history_classified INTEGER DEFAULT 0`)
 
 	log.Printf("SQLite database opened at %s", path)
 	return &SqliteStore{db: db}, nil
@@ -623,6 +648,69 @@ func (s *SqliteStore) GetPrevHashOfLastBlock(ctx context.Context, epoch int) (st
 	return hash, nil
 }
 
+func (s *SqliteStore) UpsertSlotOutcomes(ctx context.Context, epoch int, outcomes []SlotOutcome) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO slot_outcomes (epoch, slot, outcome, opponent)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (epoch, slot) DO UPDATE SET
+		   outcome = excluded.outcome,
+		   opponent = excluded.opponent`)
+	if err != nil {
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, o := range outcomes {
+		if _, err := stmt.ExecContext(ctx, o.Epoch, int64(o.Slot), o.Outcome, o.Opponent); err != nil {
+			return fmt.Errorf("upsert slot %d: %w", o.Slot, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SqliteStore) GetSlotOutcomes(ctx context.Context, epoch int) ([]SlotOutcome, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT epoch, slot, outcome, COALESCE(opponent, '') FROM slot_outcomes WHERE epoch = ? ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var outcomes []SlotOutcome
+	for rows.Next() {
+		var o SlotOutcome
+		var slot int64
+		if err := rows.Scan(&o.Epoch, &slot, &o.Outcome, &o.Opponent); err != nil {
+			return nil, err
+		}
+		o.Slot = uint64(slot)
+		outcomes = append(outcomes, o)
+	}
+	return outcomes, rows.Err()
+}
+
+func (s *SqliteStore) IsEpochClassified(ctx context.Context, epoch int) bool {
+	var classified int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT history_classified FROM leader_schedules WHERE epoch = ?`, epoch).Scan(&classified)
+	if err != nil {
+		return false
+	}
+	return classified != 0
+}
+
+func (s *SqliteStore) MarkEpochClassified(ctx context.Context, epoch int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE leader_schedules SET history_classified = 1 WHERE epoch = ?`, epoch)
+	return err
+}
+
 func (s *SqliteStore) TruncateAll(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -630,7 +718,7 @@ func (s *SqliteStore) TruncateAll(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 
-	for _, table := range []string{"blocks", "epoch_nonces", "leader_schedules"} {
+	for _, table := range []string{"blocks", "epoch_nonces", "leader_schedules", "slot_outcomes"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return fmt.Errorf("clearing %s: %w", table, err)
 		}

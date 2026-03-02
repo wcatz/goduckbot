@@ -648,6 +648,13 @@ func (i *Indexer) runChainTail() error {
 					log.Printf("Schedule backfill failed: %v", err)
 				}
 			}
+
+			// Build leaderlog history with slot classification (slow background job)
+			if i.leaderlogEnabled {
+				if err := i.buildLeaderlogHistory(ctx); err != nil {
+					log.Printf("Leaderlog history build failed: %v", err)
+				}
+			}
 		}()
 	}
 
@@ -1576,6 +1583,284 @@ func (i *Indexer) backfillSchedules(ctx context.Context) error {
 	log.Printf("Schedule backfill complete in %v: %d computed, %d skipped, %d failed",
 		time.Since(start).Round(time.Second), computed, skipped, failed)
 	return nil
+}
+
+// buildLeaderlogHistory classifies every assigned leader slot as forged, battle, or missed.
+// Runs as a slow background job: 1 Koios call per second, sequential epoch processing.
+// Fully resumable — skips epochs already classified.
+func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
+	start := time.Now()
+	log.Println("[history] Starting leaderlog history classification...")
+
+	// Determine start epoch from pool registration
+	regEpoch, err := fetchPoolRegistrationEpoch(ctx, i.bech32PoolId)
+	if err != nil {
+		return fmt.Errorf("fetching pool registration epoch: %w", err)
+	}
+	startEpoch := regEpoch + 2 // stake activation delay
+	endEpoch := i.epoch - 1    // don't classify live epoch
+
+	log.Printf("[history] Pool registered epoch %d, classifying epochs %d-%d", regEpoch, startEpoch, endEpoch)
+
+	epochLength := GetEpochLength(i.networkMagic)
+	slotToTimeFn := makeSlotToTime(i.networkMagic)
+
+	var computed, skipped, failed int
+	var totalForged, totalBattles, totalMissed int
+
+	for epoch := startEpoch; epoch <= endEpoch; epoch++ {
+		// Check for context cancellation (pod shutdown)
+		select {
+		case <-ctx.Done():
+			log.Printf("[history] Cancelled after %d epochs", computed)
+			return ctx.Err()
+		default:
+		}
+
+		// Skip already classified epochs
+		if i.store.IsEpochClassified(ctx, epoch) {
+			skipped++
+			continue
+		}
+
+		// Get or compute leader schedule
+		schedule, _ := i.store.GetLeaderSchedule(ctx, epoch)
+		if schedule == nil {
+			// Need to compute — get nonce and stake
+			nonce, nErr := i.store.GetFinalNonce(ctx, epoch)
+			if nErr != nil || nonce == nil {
+				// Try Koios fallback for nonce
+				nonce, nErr = i.nonceTracker.fetchNonceFromKoios(ctx, epoch)
+				if nErr != nil {
+					failed++
+					continue
+				}
+				time.Sleep(time.Second)
+			}
+
+			var poolStake, totalStake uint64
+			epochNo := koios.EpochNo(epoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr == nil && len(poolHist.Data) > 0 {
+				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			}
+			time.Sleep(time.Second)
+
+			if poolStake == 0 {
+				failed++
+				continue
+			}
+
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr == nil && len(epochInfo.Data) > 0 {
+				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			}
+			time.Sleep(time.Second)
+
+			if totalStake == 0 {
+				failed++
+				continue
+			}
+
+			epochStartSlot := GetEpochStartSlot(epoch, i.networkMagic)
+			schedule, err = CalculateLeaderSchedule(
+				epoch, nonce, i.vrfKey,
+				poolStake, totalStake,
+				epochLength, epochStartSlot, slotToTimeFn,
+			)
+			if err != nil {
+				log.Printf("[history] epoch %d: schedule calc failed: %v", epoch, err)
+				failed++
+				continue
+			}
+
+			if storeErr := i.store.InsertLeaderSchedule(ctx, schedule); storeErr != nil {
+				log.Printf("[history] epoch %d: store schedule failed: %v", epoch, storeErr)
+			}
+		}
+
+		// No assigned slots — mark classified and move on
+		if len(schedule.AssignedSlots) == 0 {
+			i.store.MarkEpochClassified(ctx, epoch)
+			computed++
+			continue
+		}
+
+		// Get forged slots — prefer local blocks table, fall back to Koios
+		forgedSet := make(map[uint64]bool)
+		localForged, fErr := i.store.GetForgedSlots(ctx, epoch)
+		if fErr == nil && len(localForged) > 0 {
+			for _, s := range localForged {
+				forgedSet[s] = true
+			}
+		} else {
+			// Koios fallback
+			koiosForged, kErr := fetchPoolForgedSlots(ctx, i.koios, i.bech32PoolId, epoch)
+			if kErr == nil {
+				forgedSet = koiosForged
+			}
+			time.Sleep(time.Second)
+		}
+
+		// Classify each assigned slot
+		outcomes := make([]SlotOutcome, 0, len(schedule.AssignedSlots))
+		epochForged, epochBattles, epochMissed := 0, 0, 0
+
+		for _, slot := range schedule.AssignedSlots {
+			if forgedSet[slot.Slot] {
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "forged",
+				})
+				epochForged++
+				continue
+			}
+
+			// Not forged — check if slot battle or missed
+			owner, ownerErr := fetchSlotOwner(ctx, slot.Slot)
+			time.Sleep(time.Second) // rate limit
+
+			if ownerErr != nil {
+				// Can't determine — assume missed
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "missed",
+				})
+				epochMissed++
+				continue
+			}
+
+			if owner == "" {
+				// No block at this slot — true miss
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "missed",
+				})
+				epochMissed++
+			} else {
+				// Another pool won this slot — slot battle
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "battle", Opponent: owner,
+				})
+				epochBattles++
+			}
+		}
+
+		// Persist outcomes
+		if err := i.store.UpsertSlotOutcomes(ctx, epoch, outcomes); err != nil {
+			log.Printf("[history] epoch %d: store outcomes failed: %v", epoch, err)
+			failed++
+			continue
+		}
+		i.store.MarkEpochClassified(ctx, epoch)
+
+		totalForged += epochForged
+		totalBattles += epochBattles
+		totalMissed += epochMissed
+		computed++
+
+		// Log progress every 10 epochs
+		if computed%10 == 0 {
+			log.Printf("[history] progress: %d/%d epochs classified (%d forged, %d battles, %d missed)",
+				computed, endEpoch-startEpoch+1, totalForged, totalBattles, totalMissed)
+		}
+	}
+
+	totalAssigned := totalForged + totalBattles + totalMissed
+	log.Printf("[history] Complete in %v: %d epochs (%d computed, %d skipped, %d failed)",
+		time.Since(start).Round(time.Second), endEpoch-startEpoch+1, computed, skipped, failed)
+	log.Printf("[history] Slots: %d assigned, %d forged (%.1f%%), %d battles (%.1f%%), %d missed (%.1f%%)",
+		totalAssigned, totalForged, pct(totalForged, totalAssigned),
+		totalBattles, pct(totalBattles, totalAssigned),
+		totalMissed, pct(totalMissed, totalAssigned))
+	return nil
+}
+
+func pct(n, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(n) / float64(total) * 100
+}
+
+// fetchPoolRegistrationEpoch queries Koios for the earliest pool registration epoch.
+func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, error) {
+	url := fmt.Sprintf("https://api.koios.rest/api/v1/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("koios HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result []struct {
+		ActiveEpochNo int `json:"active_epoch_no"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("parsing response: %w", err)
+	}
+	if len(result) == 0 {
+		return 0, fmt.Errorf("no pool registrations found")
+	}
+
+	return result[0].ActiveEpochNo, nil
+}
+
+// fetchPoolForgedSlots returns the set of absolute slots where the pool forged a block in the given epoch.
+func fetchPoolForgedSlots(ctx context.Context, k *koios.Client, bech32PoolId string, epoch int) (map[uint64]bool, error) {
+	epochNo := koios.EpochNo(epoch)
+	res, err := k.GetPoolBlocks(ctx, koios.PoolID(bech32PoolId), &epochNo, nil)
+	if err != nil {
+		return nil, err
+	}
+	forged := make(map[uint64]bool)
+	for _, b := range res.Data {
+		forged[uint64(b.AbsSlot)] = true
+	}
+	return forged, nil
+}
+
+// fetchSlotOwner returns the bech32 pool ID that forged a block at the given absolute slot.
+// Returns "" if no block exists at that slot (empty slot).
+func fetchSlotOwner(ctx context.Context, absSlot uint64) (string, error) {
+	url := fmt.Sprintf("https://api.koios.rest/api/v1/blocks?abs_slot=eq.%d&select=pool", absSlot)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("koios HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result []struct {
+		Pool string `json:"pool"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parsing response: %w", err)
+	}
+	if len(result) == 0 {
+		return "", nil // no block at this slot
+	}
+
+	return result[0].Pool, nil
 }
 
 // makeSlotToTime returns a function that converts a slot number to a time.Time.
