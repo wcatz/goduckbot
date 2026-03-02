@@ -68,6 +68,7 @@ type Store interface {
 	IsEpochClassified(ctx context.Context, epoch int) bool
 	MarkEpochClassified(ctx context.Context, epoch int) error
 	DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (int64, error)
+	HasBlockAtSlot(ctx context.Context, slot uint64) (bool, error)
 	TruncateAll(ctx context.Context) error
 	Close() error
 }
@@ -723,6 +724,12 @@ func (s *SqliteStore) DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (
 	_, _ = s.db.ExecContext(ctx,
 		`UPDATE leader_schedules SET history_classified = 0 WHERE epoch < ?`, epoch)
 	return n, nil
+}
+
+func (s *SqliteStore) HasBlockAtSlot(ctx context.Context, slot uint64) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blocks WHERE slot = ?)`, slot).Scan(&exists)
+	return exists, err
 }
 
 func (s *SqliteStore) TruncateAll(ctx context.Context) error {

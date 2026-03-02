@@ -59,6 +59,9 @@ const (
 	ShelleyEpochStart   = "2020-07-29T21:44:51Z"
 	StartingEpoch       = 208
 	maxRetryDuration    = time.Minute
+
+	// koiosRestBase is the base URL for direct Koios REST API calls.
+	koiosRestBase = "https://koios.tosidrop.me/api/v1"
 )
 
 // Channel to broadcast block events to connected clients
@@ -1732,35 +1735,28 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 				// Try Koios fallback for nonce
 				nonce, nErr = i.nonceTracker.fetchNonceFromKoios(ctx, epoch)
 				if nErr != nil {
+					log.Printf("[history] epoch %d: nonce unavailable: %v", epoch, nErr)
 					failed++
 					continue
 				}
 				time.Sleep(time.Second)
 			}
 
-			var poolStake, totalStake uint64
-			epochNo := koios.EpochNo(epoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr == nil && len(poolHist.Data) > 0 {
-				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			}
-			time.Sleep(time.Second)
-
-			if poolStake == 0 {
+			poolStake, psErr := fetchPoolStakeFromKoios(ctx, i.bech32PoolId, epoch)
+			if psErr != nil {
+				log.Printf("[history] epoch %d: pool stake failed: %v", epoch, psErr)
 				failed++
 				continue
 			}
-
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr == nil && len(epochInfo.Data) > 0 {
-				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-			}
 			time.Sleep(time.Second)
 
-			if totalStake == 0 {
+			totalStake, tsErr := fetchTotalStakeFromKoios(ctx, epoch)
+			if tsErr != nil {
+				log.Printf("[history] epoch %d: total stake failed: %v", epoch, tsErr)
 				failed++
 				continue
 			}
+			time.Sleep(time.Second)
 
 			epochStartSlot := GetEpochStartSlot(epoch, i.networkMagic)
 			schedule, err = CalculateLeaderSchedule(
@@ -1795,7 +1791,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 			}
 		} else {
 			// Koios fallback
-			koiosForged, kErr := fetchPoolForgedSlots(ctx, i.koios, i.bech32PoolId, epoch)
+			koiosForged, kErr := fetchPoolForgedSlots(ctx, i.bech32PoolId, epoch)
 			if kErr == nil {
 				forgedSet = koiosForged
 			}
@@ -1815,31 +1811,20 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 				continue
 			}
 
-			// Not forged — check if slot battle or missed
-			owner, ownerErr := fetchSlotOwner(ctx, slot.Slot)
-			time.Sleep(time.Second) // rate limit
-
-			if ownerErr != nil {
-				// Can't determine — assume missed
+			// Not forged — check local blocks table for slot battle vs missed
+			hasBlock, _ := i.store.HasBlockAtSlot(ctx, slot.Slot)
+			if hasBlock {
+				// Another pool forged at this slot — slot battle
 				outcomes = append(outcomes, SlotOutcome{
-					Epoch: epoch, Slot: slot.Slot, Outcome: "missed",
+					Epoch: epoch, Slot: slot.Slot, Outcome: "battle",
 				})
-				epochMissed++
-				continue
-			}
-
-			if owner == "" {
+				epochBattles++
+			} else {
 				// No block at this slot — true miss
 				outcomes = append(outcomes, SlotOutcome{
 					Epoch: epoch, Slot: slot.Slot, Outcome: "missed",
 				})
 				epochMissed++
-			} else {
-				// Another pool won this slot — slot battle
-				outcomes = append(outcomes, SlotOutcome{
-					Epoch: epoch, Slot: slot.Slot, Outcome: "battle", Opponent: owner,
-				})
-				epochBattles++
 			}
 		}
 
@@ -1856,11 +1841,8 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 		totalMissed += epochMissed
 		computed++
 
-		// Log progress every 10 epochs
-		if computed%10 == 0 {
-			log.Printf("[history] progress: %d/%d epochs classified (%d forged, %d battles, %d missed)",
-				computed, endEpoch-startEpoch+1, totalForged, totalBattles, totalMissed)
-		}
+		log.Printf("[history] epoch %d: %d forged, %d battles, %d missed (%d/%d done)",
+			epoch, epochForged, epochBattles, epochMissed, computed+skipped, endEpoch-startEpoch+1)
 	}
 
 	totalAssigned := totalForged + totalBattles + totalMissed
@@ -1918,7 +1900,7 @@ func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
 
 // fetchPoolRegistrationEpoch queries Koios for the earliest pool registration epoch.
 func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, error) {
-	url := fmt.Sprintf("https://api.koios.rest/api/v1/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
+	url := fmt.Sprintf(""+koiosRestBase+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1937,53 +1919,70 @@ func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, 
 	return result[0].ActiveEpochNo, nil
 }
 
+// fetchPoolStakeFromKoios returns the pool's active stake for the given epoch via Koios REST API.
+func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int) (uint64, error) {
+	url := fmt.Sprintf(""+koiosRestBase+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
+	body, err := koiosGetWithRetry(ctx, url)
+	if err != nil {
+		return 0, err
+	}
+	var result []struct {
+		ActiveStake json.Number `json:"active_stake"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("parsing response: %w", err)
+	}
+	if len(result) == 0 {
+		return 0, fmt.Errorf("no pool history for epoch %d", epoch)
+	}
+	stake, err := result[0].ActiveStake.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("parsing stake: %w", err)
+	}
+	return uint64(stake), nil
+}
+
+// fetchTotalStakeFromKoios returns the total network active stake for the given epoch via Koios REST API.
+func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
+	url := fmt.Sprintf(""+koiosRestBase+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
+	body, err := koiosGetWithRetry(ctx, url)
+	if err != nil {
+		return 0, err
+	}
+	var result []struct {
+		ActiveStake json.Number `json:"active_stake"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("parsing response: %w", err)
+	}
+	if len(result) == 0 {
+		return 0, fmt.Errorf("no epoch info for epoch %d", epoch)
+	}
+	stake, err := result[0].ActiveStake.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("parsing stake: %w", err)
+	}
+	return uint64(stake), nil
+}
+
 // fetchPoolForgedSlots returns the set of absolute slots where the pool forged a block in the given epoch.
-func fetchPoolForgedSlots(ctx context.Context, k *koios.Client, bech32PoolId string, epoch int) (map[uint64]bool, error) {
-	epochNo := koios.EpochNo(epoch)
-	res, err := k.GetPoolBlocks(ctx, koios.PoolID(bech32PoolId), &epochNo, nil)
+func fetchPoolForgedSlots(ctx context.Context, bech32PoolId string, epoch int) (map[uint64]bool, error) {
+	url := fmt.Sprintf(""+koiosRestBase+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
+	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	forged := make(map[uint64]bool)
-	for _, b := range res.Data {
-		forged[uint64(b.AbsSlot)] = true
-	}
-	return forged, nil
-}
-
-// fetchSlotOwner returns the bech32 pool ID that forged a block at the given absolute slot.
-// Returns "" if no block exists at that slot (empty slot).
-func fetchSlotOwner(ctx context.Context, absSlot uint64) (string, error) {
-	url := fmt.Sprintf("https://api.koios.rest/api/v1/blocks?abs_slot=eq.%d&select=pool", absSlot)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("koios HTTP request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
-	}
-
 	var result []struct {
-		Pool string `json:"pool"`
+		AbsSlot uint64 `json:"abs_slot"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing response: %w", err)
+		return nil, fmt.Errorf("parsing response: %w", err)
 	}
-	if len(result) == 0 {
-		return "", nil // no block at this slot
+	forged := make(map[uint64]bool)
+	for _, b := range result {
+		forged[b.AbsSlot] = true
 	}
-
-	return result[0].Pool, nil
+	return forged, nil
 }
 
 // makeSlotToTime returns a function that converts a slot number to a time.Time.

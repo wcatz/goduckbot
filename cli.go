@@ -460,7 +460,7 @@ func cmdCLIHistory(args []string) int {
 				forgedSet[s] = true
 			}
 		} else {
-			koiosForged, kErr := fetchPoolForgedSlots(ctx, cc.koios, cc.bech32PoolId, epoch)
+			koiosForged, kErr := fetchPoolForgedSlots(ctx, cc.bech32PoolId, epoch)
 			if kErr == nil {
 				forgedSet = koiosForged
 			}
@@ -480,19 +480,17 @@ func cmdCLIHistory(args []string) int {
 				continue
 			}
 
-			owner, ownerErr := fetchSlotOwner(ctx, slot.Slot)
-			time.Sleep(time.Second)
-
-			if ownerErr != nil || owner == "" {
+			hasBlock, _ := cc.store.HasBlockAtSlot(ctx, slot.Slot)
+			if hasBlock {
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "battle",
+				})
+				epochBattles++
+			} else {
 				outcomes = append(outcomes, SlotOutcome{
 					Epoch: epoch, Slot: slot.Slot, Outcome: "missed",
 				})
 				epochMissed++
-			} else {
-				outcomes = append(outcomes, SlotOutcome{
-					Epoch: epoch, Slot: slot.Slot, Outcome: "battle", Opponent: owner,
-				})
-				epochBattles++
 			}
 		}
 

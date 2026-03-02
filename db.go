@@ -640,6 +640,12 @@ func (s *PgStore) DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (int6
 	return tag.RowsAffected(), nil
 }
 
+func (s *PgStore) HasBlockAtSlot(ctx context.Context, slot uint64) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM blocks WHERE slot = $1)`, slot).Scan(&exists)
+	return exists, err
+}
+
 func (s *PgStore) TruncateAll(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules, slot_outcomes`)
 	return err
