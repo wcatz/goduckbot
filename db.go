@@ -43,8 +43,18 @@ CREATE TABLE IF NOT EXISTS leader_schedules (
     performance    DOUBLE PRECISION,
     slots          JSONB DEFAULT '[]',
     posted         BOOLEAN DEFAULT FALSE,
+    history_classified BOOLEAN DEFAULT FALSE,
     calculated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS slot_outcomes (
+    epoch    INTEGER NOT NULL,
+    slot     BIGINT NOT NULL,
+    outcome  TEXT NOT NULL,
+    opponent TEXT,
+    PRIMARY KEY (epoch, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_slot_outcomes_epoch ON slot_outcomes(epoch);
 `
 
 // PgStore implements Store using PostgreSQL via pgx.
@@ -71,6 +81,9 @@ func NewPgStore(connString string) (*PgStore, error) {
 		pool.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
+
+	// Migrations for existing databases
+	pool.Exec(ctx, `ALTER TABLE leader_schedules ADD COLUMN IF NOT EXISTS history_classified BOOLEAN DEFAULT FALSE`)
 
 	log.Println("PostgreSQL connected and schema initialized")
 	return &PgStore{pool: pool}, nil
@@ -558,7 +571,64 @@ func (s *PgStore) GetPrevHashOfLastBlock(ctx context.Context, epoch int) (string
 	return hash, nil
 }
 
+func (s *PgStore) UpsertSlotOutcomes(ctx context.Context, epoch int, outcomes []SlotOutcome) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for _, o := range outcomes {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO slot_outcomes (epoch, slot, outcome, opponent)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (epoch, slot) DO UPDATE SET
+			   outcome = EXCLUDED.outcome,
+			   opponent = EXCLUDED.opponent`,
+			o.Epoch, int64(o.Slot), o.Outcome, o.Opponent)
+		if err != nil {
+			return fmt.Errorf("upsert slot %d: %w", o.Slot, err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PgStore) GetSlotOutcomes(ctx context.Context, epoch int) ([]SlotOutcome, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT epoch, slot, outcome, COALESCE(opponent, '') FROM slot_outcomes WHERE epoch = $1 ORDER BY slot`, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var outcomes []SlotOutcome
+	for rows.Next() {
+		var o SlotOutcome
+		if err := rows.Scan(&o.Epoch, &o.Slot, &o.Outcome, &o.Opponent); err != nil {
+			return nil, err
+		}
+		outcomes = append(outcomes, o)
+	}
+	return outcomes, rows.Err()
+}
+
+func (s *PgStore) IsEpochClassified(ctx context.Context, epoch int) bool {
+	var classified bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT history_classified FROM leader_schedules WHERE epoch = $1`, epoch).Scan(&classified)
+	if err != nil {
+		return false
+	}
+	return classified
+}
+
+func (s *PgStore) MarkEpochClassified(ctx context.Context, epoch int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE leader_schedules SET history_classified = TRUE WHERE epoch = $1`, epoch)
+	return err
+}
+
 func (s *PgStore) TruncateAll(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules`)
+	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules, slot_outcomes`)
 	return err
 }

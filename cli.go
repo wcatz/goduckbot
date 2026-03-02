@@ -38,6 +38,8 @@ func runCLI(args []string) int {
 		return cmdCLILeaderlog(args[1:])
 	case "nonce":
 		return cmdCLINonce(args[1:])
+	case "history":
+		return cmdCLIHistory(args[1:])
 	case "help", "--help", "-h":
 		printCLIHelp()
 		return 0
@@ -56,6 +58,9 @@ Usage:
   goduckbot leaderlog <epoch>     Calculate leaderlog for a single epoch
   goduckbot leaderlog <N>-<M>     Calculate leaderlog for epoch range (max 10)
   goduckbot nonce <epoch>         Show epoch nonce
+  goduckbot history               Build complete leaderlog history with slot classification
+  goduckbot history --force       Re-classify already-processed epochs
+  goduckbot history --from N      Start from epoch N (overrides auto-detect)
   goduckbot help                  Show this help
 
 Config is loaded from config.yaml in the current directory.
@@ -325,6 +330,192 @@ func cmdCLINonce(args []string) int {
 	}
 
 	fmt.Printf("Epoch:  %d\nNonce:  %s\nSource: %s\n", epoch, hex.EncodeToString(nonce), source)
+	return 0
+}
+
+func cmdCLIHistory(args []string) int {
+	cc, cleanup, err := cliInit()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Init failed: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+
+	// Parse flags
+	force := false
+	fromEpoch := 0
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--force":
+			force = true
+		case "--from":
+			if i+1 < len(args) {
+				i++
+				n, e := strconv.Atoi(args[i])
+				if e != nil {
+					fmt.Fprintf(os.Stderr, "Invalid epoch %q\n", args[i])
+					return 1
+				}
+				fromEpoch = n
+			}
+		}
+	}
+
+	ctx := context.Background()
+
+	// Determine start epoch
+	var startEpoch int
+	if fromEpoch > 0 {
+		startEpoch = fromEpoch
+	} else {
+		regEpoch, regErr := fetchPoolRegistrationEpoch(ctx, cc.bech32PoolId)
+		if regErr != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching pool registration: %v\n", regErr)
+			return 1
+		}
+		startEpoch = regEpoch + 2
+	}
+
+	curEpoch := calcCurrentEpoch(cc.networkMagic)
+	endEpoch := curEpoch - 1
+
+	log.Printf("[history] Classifying epochs %d-%d (force=%v)", startEpoch, endEpoch, force)
+
+	epochLength := GetEpochLength(cc.networkMagic)
+	slotToTimeFn := makeSlotToTime(cc.networkMagic)
+	start := time.Now()
+
+	var computed, skipped, failed int
+	var totalForged, totalBattles, totalMissed int
+
+	for epoch := startEpoch; epoch <= endEpoch; epoch++ {
+		if !force && cc.store.IsEpochClassified(ctx, epoch) {
+			skipped++
+			continue
+		}
+
+		// Get or compute schedule
+		schedule, _ := cc.store.GetLeaderSchedule(ctx, epoch)
+		if schedule == nil {
+			nonce, nErr := cc.nonceTracker.GetNonceForEpoch(epoch)
+			if nErr != nil {
+				failed++
+				continue
+			}
+
+			var poolStake, totalStake uint64
+			epochNo := koios.EpochNo(epoch)
+			poolHist, histErr := cc.koios.GetPoolHistory(ctx, koios.PoolID(cc.bech32PoolId), &epochNo, nil)
+			if histErr == nil && len(poolHist.Data) > 0 {
+				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			}
+			time.Sleep(time.Second)
+
+			if poolStake == 0 {
+				failed++
+				continue
+			}
+
+			epochInfo, infoErr := cc.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr == nil && len(epochInfo.Data) > 0 {
+				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			}
+			time.Sleep(time.Second)
+
+			if totalStake == 0 {
+				failed++
+				continue
+			}
+
+			epochStartSlot := GetEpochStartSlot(epoch, cc.networkMagic)
+			schedule, err = CalculateLeaderSchedule(
+				epoch, nonce, cc.vrfKey,
+				poolStake, totalStake,
+				epochLength, epochStartSlot, slotToTimeFn,
+			)
+			if err != nil {
+				log.Printf("[history] epoch %d: calc failed: %v", epoch, err)
+				failed++
+				continue
+			}
+			cc.store.InsertLeaderSchedule(ctx, schedule)
+		}
+
+		if len(schedule.AssignedSlots) == 0 {
+			cc.store.MarkEpochClassified(ctx, epoch)
+			computed++
+			continue
+		}
+
+		// Get forged slots
+		forgedSet := make(map[uint64]bool)
+		localForged, fErr := cc.store.GetForgedSlots(ctx, epoch)
+		if fErr == nil && len(localForged) > 0 {
+			for _, s := range localForged {
+				forgedSet[s] = true
+			}
+		} else {
+			koiosForged, kErr := fetchPoolForgedSlots(ctx, cc.koios, cc.bech32PoolId, epoch)
+			if kErr == nil {
+				forgedSet = koiosForged
+			}
+			time.Sleep(time.Second)
+		}
+
+		// Classify slots
+		outcomes := make([]SlotOutcome, 0, len(schedule.AssignedSlots))
+		epochForged, epochBattles, epochMissed := 0, 0, 0
+
+		for _, slot := range schedule.AssignedSlots {
+			if forgedSet[slot.Slot] {
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "forged",
+				})
+				epochForged++
+				continue
+			}
+
+			owner, ownerErr := fetchSlotOwner(ctx, slot.Slot)
+			time.Sleep(time.Second)
+
+			if ownerErr != nil || owner == "" {
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "missed",
+				})
+				epochMissed++
+			} else {
+				outcomes = append(outcomes, SlotOutcome{
+					Epoch: epoch, Slot: slot.Slot, Outcome: "battle", Opponent: owner,
+				})
+				epochBattles++
+			}
+		}
+
+		if storeErr := cc.store.UpsertSlotOutcomes(ctx, epoch, outcomes); storeErr != nil {
+			log.Printf("[history] epoch %d: store failed: %v", epoch, storeErr)
+			failed++
+			continue
+		}
+		cc.store.MarkEpochClassified(ctx, epoch)
+
+		totalForged += epochForged
+		totalBattles += epochBattles
+		totalMissed += epochMissed
+		computed++
+
+		if computed%10 == 0 {
+			log.Printf("[history] progress: %d epochs classified", computed)
+		}
+	}
+
+	totalAssigned := totalForged + totalBattles + totalMissed
+	fmt.Printf("\nLeaderlog History Complete (%v)\n", time.Since(start).Round(time.Second))
+	fmt.Printf("Epochs: %d-%d (%d computed, %d skipped, %d failed)\n",
+		startEpoch, endEpoch, computed, skipped, failed)
+	fmt.Printf("Slots:  %d assigned, %d forged (%.1f%%), %d battles (%.1f%%), %d missed (%.1f%%)\n",
+		totalAssigned, totalForged, pct(totalForged, totalAssigned),
+		totalBattles, pct(totalBattles, totalAssigned),
+		totalMissed, pct(totalMissed, totalAssigned))
 	return 0
 }
 
