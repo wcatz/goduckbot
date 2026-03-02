@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	crypto_rand "crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +41,6 @@ import (
 	"github.com/michimani/gotwi"
 	"github.com/michimani/gotwi/media/upload"
 	upload_types "github.com/michimani/gotwi/media/upload/types"
-	"github.com/michimani/gotwi/tweet/managetweet"
-	"github.com/michimani/gotwi/tweet/managetweet/types"
 	"github.com/spf13/viper"
 	telebot "gopkg.in/tucnak/telebot.v2"
 )
@@ -104,7 +107,12 @@ type Indexer struct {
 	// Social network toggles
 	telegramEnabled bool
 	twitterEnabled  bool
-	twitterClient   *gotwi.Client
+	twitterClient   *gotwi.Client // used for media upload only
+	// Raw OAuth1 credentials for tweet posting (signs with api.x.com)
+	twitterAPIKey       string
+	twitterAPISecret    string
+	twitterAccessToken  string
+	twitterAccessSecret string
 	// Bot command access control
 	allowedUsers  map[int64]bool
 	allowedGroups map[int64]bool
@@ -326,6 +334,13 @@ func (i *Indexer) Start() error {
 
 		if twitterAPIKey != "" && twitterAPISecret != "" &&
 			twitterAccessToken != "" && twitterAccessTokenSecret != "" {
+			// Store raw credentials for OAuth1 tweet signing (api.x.com)
+			i.twitterAPIKey = twitterAPIKey
+			i.twitterAPISecret = twitterAPISecret
+			i.twitterAccessToken = twitterAccessToken
+			i.twitterAccessSecret = twitterAccessTokenSecret
+
+			// gotwi client used for media upload only (already uses api.x.com)
 			var err error
 			in := &gotwi.NewClientInput{
 				AuthenticationMethod: gotwi.AuthenMethodOAuth1UserContext,
@@ -333,9 +348,6 @@ func (i *Indexer) Start() error {
 				OAuthTokenSecret:     twitterAccessTokenSecret,
 				APIKey:               twitterAPIKey,
 				APIKeySecret:         twitterAPISecret,
-				HTTPClient: &http.Client{
-					Transport: &xAPITransport{Base: http.DefaultTransport},
-				},
 			}
 			i.twitterClient, err = gotwi.NewClient(in)
 			if err != nil {
@@ -1208,18 +1220,20 @@ func (i *Indexer) uploadMediaToTwitter(mediaBytes []byte, mediaType upload_types
 	return finalizeOutput.Data.MediaID, nil
 }
 
-// Send tweet with optional media (GIF or image)
+// Send tweet with optional media (GIF or image).
+// Uses raw OAuth1 HMAC-SHA256 signing against api.x.com to avoid gotwi's
+// hardcoded api.twitter.com endpoint (OAuth signature mismatch → 401).
 func (i *Indexer) sendTweet(text string, mediaURL string, isGif bool) error {
-	if !i.twitterEnabled || i.twitterClient == nil {
+	if !i.twitterEnabled {
 		return nil
 	}
 
-	// Create tweet request
-	input := &types.CreateInput{
-		Text: gotwi.String(text),
+	// Build tweet JSON body
+	tweetBody := map[string]interface{}{
+		"text": text,
 	}
 
-	// If media URL is provided, download and upload it
+	// If media URL is provided, download and upload it via gotwi (uses api.x.com)
 	if mediaURL != "" {
 		mediaBytes, err := downloadImage(mediaURL)
 		if err != nil {
@@ -1235,23 +1249,95 @@ func (i *Indexer) sendTweet(text string, mediaURL string, isGif bool) error {
 			if uploadErr != nil {
 				log.Printf("failed to upload media to Twitter, posting text-only tweet: %v", uploadErr)
 			} else {
-				input.Media = &types.CreateInputMedia{
-					MediaIDs: []string{mediaID},
+				tweetBody["media"] = map[string]interface{}{
+					"media_ids": []string{mediaID},
 				}
 			}
 		}
 	}
 
-	// Post the tweet (with or without media)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_, err := managetweet.Create(ctx, i.twitterClient, input)
+	bodyJSON, err := json.Marshal(tweetBody)
+	if err != nil {
+		return fmt.Errorf("marshal tweet body: %w", err)
+	}
+
+	// Post tweet with raw OAuth1 signing
+	resp, err := i.oauthPost("https://api.x.com/2/tweets", bodyJSON)
 	if err != nil {
 		return fmt.Errorf("failed to post tweet: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("tweet API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	log.Println("Tweet posted successfully")
 	return nil
+}
+
+// oauthPost signs and sends an OAuth1 HMAC-SHA256 POST request.
+func (i *Indexer) oauthPost(endpoint string, body []byte) (*http.Response, error) {
+	// Generate nonce and timestamp
+	nonceBytes := make([]byte, 16)
+	if _, err := crypto_rand.Read(nonceBytes); err != nil {
+		return nil, err
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// OAuth parameters
+	params := map[string]string{
+		"oauth_consumer_key":     i.twitterAPIKey,
+		"oauth_nonce":            nonce,
+		"oauth_signature_method": "HMAC-SHA256",
+		"oauth_timestamp":        timestamp,
+		"oauth_token":            i.twitterAccessToken,
+		"oauth_version":          "1.0",
+	}
+
+	// Build sorted parameter string
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var paramParts []string
+	for _, k := range keys {
+		paramParts = append(paramParts, url.QueryEscape(k)+"="+url.QueryEscape(params[k]))
+	}
+	paramString := strings.Join(paramParts, "&")
+
+	// Signature base string: METHOD&url&params
+	sigBase := "POST&" + url.QueryEscape(endpoint) + "&" + url.QueryEscape(paramString)
+
+	// Signing key: consumer_secret&token_secret
+	signingKey := url.QueryEscape(i.twitterAPISecret) + "&" + url.QueryEscape(i.twitterAccessSecret)
+
+	// HMAC-SHA256
+	mac := hmac.New(sha256.New, []byte(signingKey))
+	mac.Write([]byte(sigBase))
+	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	// Build Authorization header
+	authHeader := fmt.Sprintf(
+		`OAuth oauth_consumer_key="%s",oauth_nonce="%s",oauth_signature="%s",oauth_signature_method="HMAC-SHA256",oauth_timestamp="%s",oauth_token="%s",oauth_version="1.0"`,
+		url.QueryEscape(i.twitterAPIKey),
+		url.QueryEscape(nonce),
+		url.QueryEscape(signature),
+		url.QueryEscape(timestamp),
+		url.QueryEscape(i.twitterAccessToken),
+	)
+
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+
+	return http.DefaultClient.Do(req)
 }
 
 // convertToBech32 converts a hex pool ID to bech32 format using gouroboros.
@@ -1780,25 +1866,48 @@ func pct(n, total int) float64 {
 	return float64(n) / float64(total) * 100
 }
 
+// koiosGetWithRetry performs a GET request to Koios with retry on 429/503.
+// Retries up to 5 times with exponential backoff (5s, 10s, 20s, 40s, 60s).
+func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
+	backoff := 5 * time.Second
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating request: %w", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("koios HTTP request: %w", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reading response: %w", err)
+		}
+		if resp.StatusCode == 200 {
+			return body, nil
+		}
+		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+			log.Printf("[history] Koios %d, retrying in %v (attempt %d/5)", resp.StatusCode, backoff, attempt+1)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, 60*time.Second)
+			continue
+		}
+		return nil, fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil, fmt.Errorf("koios request failed after 5 retries: %s", url)
+}
+
 // fetchPoolRegistrationEpoch queries Koios for the earliest pool registration epoch.
 func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, error) {
 	url := fmt.Sprintf("https://api.koios.rest/api/v1/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
-		return 0, fmt.Errorf("creating request: %w", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("koios HTTP request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
+		return 0, err
 	}
 
 	var result []struct {
@@ -1930,20 +2039,6 @@ func formatNumber(n int64) string {
 		result = append(result, byte(c))
 	}
 	return string(result)
-}
-
-// xAPITransport rewrites api.twitter.com to api.x.com to bypass Cloudflare blocks.
-type xAPITransport struct {
-	Base http.RoundTripper
-}
-
-func (t *xAPITransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Host == "api.twitter.com" {
-		req = req.Clone(req.Context())
-		req.URL.Host = "api.x.com"
-		req.Host = "api.x.com"
-	}
-	return t.Base.RoundTrip(req)
 }
 
 // formatADA converts lovelace to ADA with comma-separated whole part and 2 decimal places.
