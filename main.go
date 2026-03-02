@@ -560,7 +560,7 @@ func (i *Indexer) runChainTail() error {
 		writerDone := make(chan struct{})
 		go func() {
 			defer close(writerDone)
-			batch := make([]BlockData, 0, 1000)
+			batch := make([]BlockData, 0, 2000)
 			ticker := time.NewTicker(2 * time.Second)
 			defer ticker.Stop()
 			for {
@@ -574,7 +574,7 @@ func (i *Indexer) runChainTail() error {
 						return
 					}
 					batch = append(batch, b)
-					if len(batch) >= 1000 {
+					if len(batch) >= 2000 {
 						i.flushBlockBatch(batch)
 						batch = batch[:0]
 					}
@@ -596,9 +596,11 @@ func (i *Indexer) runChainTail() error {
 				i.nodeAddresses[0],
 				func(slot uint64, epoch int, blockHash string, vrfOutput []byte) {
 					blockCh <- BlockData{Slot: slot, Epoch: epoch, BlockHash: blockHash, VrfOutput: vrfOutput, NetworkMagic: i.networkMagic}
+					atomic.StoreInt64(&i.syncer.chanLen, int64(len(blockCh)))
 				},
 				onCaughtUp,
 			)
+			i.syncer.chanCap = int64(cap(blockCh))
 
 			if err := i.syncer.Start(syncCtx); err != nil {
 				if syncCtx.Err() != nil {

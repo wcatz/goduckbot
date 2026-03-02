@@ -43,6 +43,8 @@ type ChainSyncer struct {
 	conn         *ouroboros.Connection
 	blockssynced uint64 // atomic counter for progress logging
 	tipSlot      uint64 // atomic: current tip slot for progress tracking
+	chanLen      int64  // atomic: current block channel occupancy (set by writer)
+	chanCap      int64  // channel capacity for pressure calculation
 	caughtUp     atomic.Bool
 	// Progress tracking
 	syncStart    time.Time
@@ -80,7 +82,7 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	chainSyncCfg := chainsync.NewConfig(
 		chainsync.WithRollForwardFunc(s.handleRollForward),
 		chainsync.WithRollBackwardFunc(s.handleRollBackward),
-		chainsync.WithPipelineLimit(50),
+		chainsync.WithPipelineLimit(100),
 	)
 
 	// Connect to node via NtN (required for TCP connections)
@@ -268,9 +270,14 @@ func (s *ChainSyncer) handleRollForward(ctx chainsync.CallbackContext, blockType
 			}
 		}
 		blkPerSec := float64(count) / elapsed.Seconds()
+		chLen := atomic.LoadInt64(&s.chanLen)
+		chPct := 0.0
+		if s.chanCap > 0 {
+			chPct = float64(chLen) / float64(s.chanCap) * 100
+		}
 
-		log.Printf("[sync] slot %d/%d (%.1f%%) | epoch %d | %s | %.0f blk/s | elapsed %s | ETA %s",
-			slot, tipSlot, pct, epoch, era, blkPerSec,
+		log.Printf("[sync] slot %d/%d (%.1f%%) | epoch %d | %s | %.0f blk/s | buf %.0f%% | elapsed %s | ETA %s",
+			slot, tipSlot, pct, epoch, era, blkPerSec, chPct,
 			elapsed.Round(time.Second), eta.Round(time.Second))
 
 		s.lastLogTime = now
