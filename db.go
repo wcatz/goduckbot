@@ -628,6 +628,18 @@ func (s *PgStore) MarkEpochClassified(ctx context.Context, epoch int) error {
 	return err
 }
 
+func (s *PgStore) DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM slot_outcomes WHERE epoch < $1`, epoch)
+	if err != nil {
+		return 0, err
+	}
+	// Also unmark those epochs as classified so they won't be skipped
+	_, _ = s.pool.Exec(ctx,
+		`UPDATE leader_schedules SET history_classified = FALSE WHERE epoch < $1`, epoch)
+	return tag.RowsAffected(), nil
+}
+
 func (s *PgStore) TruncateAll(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules, slot_outcomes`)
 	return err

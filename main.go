@@ -1680,15 +1680,27 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 	start := time.Now()
 	log.Println("[history] Starting leaderlog history classification...")
 
-	// Determine start epoch from pool registration
+	// Determine start epoch: we only implement CPraos (Babbage+), so skip TPraos eras.
+	// Babbage HFC on mainnet = epoch 365, preprod = epoch 12.
+	babbageStart := BabbageStartEpoch
+	if i.networkMagic == PreprodNetworkMagic {
+		babbageStart = PreprodBabbageStartEpoch
+	}
+
 	regEpoch, err := fetchPoolRegistrationEpoch(ctx, i.bech32PoolId)
 	if err != nil {
 		return fmt.Errorf("fetching pool registration epoch: %w", err)
 	}
-	startEpoch := regEpoch + 2 // stake activation delay
-	endEpoch := i.epoch - 1    // don't classify live epoch
+	startEpoch := max(regEpoch+2, babbageStart) // CPraos only
+	endEpoch := i.epoch - 1                     // don't classify live epoch
 
-	log.Printf("[history] Pool registered epoch %d, classifying epochs %d-%d", regEpoch, startEpoch, endEpoch)
+	log.Printf("[history] Pool registered epoch %d, CPraos from epoch %d, classifying epochs %d-%d",
+		regEpoch, babbageStart, startEpoch, endEpoch)
+
+	// Clean up any bad pre-CPraos data from previous runs
+	if cleaned, err := i.store.DeleteSlotOutcomesBefore(ctx, startEpoch); err == nil && cleaned > 0 {
+		log.Printf("[history] Cleaned %d invalid pre-CPraos slot outcomes", cleaned)
+	}
 
 	epochLength := GetEpochLength(i.networkMagic)
 	slotToTimeFn := makeSlotToTime(i.networkMagic)

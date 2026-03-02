@@ -363,7 +363,12 @@ func cmdCLIHistory(args []string) int {
 
 	ctx := context.Background()
 
-	// Determine start epoch
+	// Determine start epoch — CPraos only (Babbage+)
+	babbageStart := BabbageStartEpoch
+	if cc.networkMagic == PreprodNetworkMagic {
+		babbageStart = PreprodBabbageStartEpoch
+	}
+
 	var startEpoch int
 	if fromEpoch > 0 {
 		startEpoch = fromEpoch
@@ -373,7 +378,7 @@ func cmdCLIHistory(args []string) int {
 			fmt.Fprintf(os.Stderr, "Error fetching pool registration: %v\n", regErr)
 			return 1
 		}
-		startEpoch = regEpoch + 2
+		startEpoch = max(regEpoch+2, babbageStart)
 	}
 
 	curEpoch := calcCurrentEpoch(cc.networkMagic)

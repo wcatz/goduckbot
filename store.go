@@ -67,6 +67,7 @@ type Store interface {
 	GetSlotOutcomes(ctx context.Context, epoch int) ([]SlotOutcome, error)
 	IsEpochClassified(ctx context.Context, epoch int) bool
 	MarkEpochClassified(ctx context.Context, epoch int) error
+	DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (int64, error)
 	TruncateAll(ctx context.Context) error
 	Close() error
 }
@@ -709,6 +710,19 @@ func (s *SqliteStore) MarkEpochClassified(ctx context.Context, epoch int) error 
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE leader_schedules SET history_classified = 1 WHERE epoch = ?`, epoch)
 	return err
+}
+
+func (s *SqliteStore) DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM slot_outcomes WHERE epoch < ?`, epoch)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	// Also unmark those epochs as classified so they won't be skipped
+	_, _ = s.db.ExecContext(ctx,
+		`UPDATE leader_schedules SET history_classified = 0 WHERE epoch < ?`, epoch)
+	return n, nil
 }
 
 func (s *SqliteStore) TruncateAll(ctx context.Context) error {
