@@ -1727,12 +1727,14 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 		}
 
 		// Get or compute leader schedule
+		log.Printf("[history] epoch %d: starting...", epoch)
 		schedule, _ := i.store.GetLeaderSchedule(ctx, epoch)
 		if schedule == nil {
 			// Need to compute — get nonce and stake
 			nonce, nErr := i.store.GetFinalNonce(ctx, epoch)
 			if nErr != nil || nonce == nil {
 				// Try Koios fallback for nonce
+				log.Printf("[history] epoch %d: fetching nonce from Koios...", epoch)
 				nonce, nErr = i.nonceTracker.fetchNonceFromKoios(ctx, epoch)
 				if nErr != nil {
 					log.Printf("[history] epoch %d: nonce unavailable: %v", epoch, nErr)
@@ -1742,6 +1744,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 				time.Sleep(time.Second)
 			}
 
+			log.Printf("[history] epoch %d: fetching pool stake...", epoch)
 			poolStake, psErr := fetchPoolStakeFromKoios(ctx, i.bech32PoolId, epoch)
 			if psErr != nil {
 				log.Printf("[history] epoch %d: pool stake failed: %v", epoch, psErr)
