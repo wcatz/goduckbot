@@ -666,9 +666,13 @@ func (i *Indexer) runChainTail() error {
 				}
 			}
 
-			// Build leaderlog history with slot classification (slow background job)
+			// Build leaderlog history with slot classification (slow background job).
+			// Uses its own long-lived context since it can take hours to classify
+			// hundreds of epochs. The job is resumable across restarts.
 			if i.leaderlogEnabled {
-				if err := i.buildLeaderlogHistory(ctx); err != nil {
+				histCtx, histCancel := context.WithTimeout(context.Background(), 12*time.Hour)
+				defer histCancel()
+				if err := i.buildLeaderlogHistory(histCtx); err != nil {
 					log.Printf("Leaderlog history build failed: %v", err)
 				}
 			}
@@ -1727,14 +1731,12 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 		}
 
 		// Get or compute leader schedule
-		log.Printf("[history] epoch %d: starting...", epoch)
 		schedule, _ := i.store.GetLeaderSchedule(ctx, epoch)
 		if schedule == nil {
 			// Need to compute — get nonce and stake
 			nonce, nErr := i.store.GetFinalNonce(ctx, epoch)
 			if nErr != nil || nonce == nil {
 				// Try Koios fallback for nonce
-				log.Printf("[history] epoch %d: fetching nonce from Koios...", epoch)
 				nonce, nErr = i.nonceTracker.fetchNonceFromKoios(ctx, epoch)
 				if nErr != nil {
 					log.Printf("[history] epoch %d: nonce unavailable: %v", epoch, nErr)
@@ -1744,7 +1746,6 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 				time.Sleep(time.Second)
 			}
 
-			log.Printf("[history] epoch %d: fetching pool stake...", epoch)
 			poolStake, psErr := fetchPoolStakeFromKoios(ctx, i.bech32PoolId, epoch)
 			if psErr != nil {
 				log.Printf("[history] epoch %d: pool stake failed: %v", epoch, psErr)
