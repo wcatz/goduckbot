@@ -717,9 +717,6 @@ func (i *Indexer) startAdderPipeline() error {
 				output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
 				i.pipeline.AddOutput(output)
 
-				// Reset interval tracking before Start() spawns event goroutines
-				prevBlockTimestamp = time.Time{}
-
 				err := i.pipeline.Start()
 				if err != nil {
 					log.Printf("Failed to start pipeline on %s: %s. Retrying...", host, err)
@@ -1786,21 +1783,14 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 			continue
 		}
 
-		// Get forged slots — prefer local blocks table, fall back to Koios
-		forgedSet := make(map[uint64]bool)
-		localForged, fErr := i.store.GetForgedSlots(ctx, epoch)
-		if fErr == nil && len(localForged) > 0 {
-			for _, s := range localForged {
-				forgedSet[s] = true
-			}
-		} else {
-			// Koios fallback
-			koiosForged, kErr := fetchPoolForgedSlots(ctx, i.bech32PoolId, epoch)
-			if kErr == nil {
-				forgedSet = koiosForged
-			}
-			time.Sleep(time.Second)
+		// Get OUR pool's forged slots from Koios (local blocks table has all
+		// pools' blocks, so it can't distinguish our forges from others')
+		forgedSet, fErr := fetchPoolForgedSlots(ctx, i.bech32PoolId, epoch)
+		if fErr != nil {
+			log.Printf("[history] epoch %d: pool forged slots failed: %v", epoch, fErr)
+			forgedSet = make(map[uint64]bool)
 		}
+		time.Sleep(time.Second)
 
 		// Classify each assigned slot
 		outcomes := make([]SlotOutcome, 0, len(schedule.AssignedSlots))

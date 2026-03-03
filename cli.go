@@ -452,20 +452,13 @@ func cmdCLIHistory(args []string) int {
 			continue
 		}
 
-		// Get forged slots
-		forgedSet := make(map[uint64]bool)
-		localForged, fErr := cc.store.GetForgedSlots(ctx, epoch)
-		if fErr == nil && len(localForged) > 0 {
-			for _, s := range localForged {
-				forgedSet[s] = true
-			}
-		} else {
-			koiosForged, kErr := fetchPoolForgedSlots(ctx, cc.bech32PoolId, epoch)
-			if kErr == nil {
-				forgedSet = koiosForged
-			}
-			time.Sleep(time.Second)
+		// Get OUR pool's forged slots from Koios
+		forgedSet, fErr := fetchPoolForgedSlots(ctx, cc.bech32PoolId, epoch)
+		if fErr != nil {
+			log.Printf("[history] epoch %d: pool forged slots failed: %v", epoch, fErr)
+			forgedSet = make(map[uint64]bool)
 		}
+		time.Sleep(time.Second)
 
 		// Classify slots
 		outcomes := make([]SlotOutcome, 0, len(schedule.AssignedSlots))
