@@ -70,6 +70,12 @@ type Store interface {
     GetLeaderSchedule(ctx, epoch) (*LeaderSchedule, error)
     IsSchedulePosted(ctx, epoch) bool
     MarkSchedulePosted(ctx, epoch) error
+    UpsertSlotOutcomes(ctx, epoch, outcomes []SlotOutcome) error
+    GetSlotOutcomes(ctx, epoch) ([]SlotOutcome, error)
+    IsEpochClassified(ctx, epoch) bool
+    MarkEpochClassified(ctx, epoch) error
+    DeleteSlotOutcomesBefore(ctx, epoch) (int64, error)
+    HasBlockAtSlot(ctx, slot) (bool, error)
     TruncateAll(ctx) error
     Close() error
 }
@@ -95,6 +101,8 @@ All INSERT operations use `ON CONFLICT` (upsert) for idempotency on restarts.
 - WebSocket broadcast for block events
 - Telegram message chunking for messages >4096 chars
 - DB integrity check on startup with nonce repair
+- Leaderlog history classification (forged/battle/missed) as resumable background job
+- Koios REST API calls via `koiosGetWithRetry` with 429/503 backoff and 30s HTTP timeout
 
 ## Leaderlog
 
@@ -188,7 +196,8 @@ Constants defined in `leaderlog.go`: `MainnetNetworkMagic`, `PreprodNetworkMagic
 ### Database Schema (auto-created by Store constructors)
 - `blocks` — per-block VRF data (slot PK, epoch, block_hash, vrf_output, nonce_value)
 - `epoch_nonces` — evolving/candidate/final nonces per epoch with source tracking
-- `leader_schedules` — calculated schedules with slots JSON, posted flag
+- `leader_schedules` — calculated schedules with slots JSON, posted flag, history_classified flag
+- `slot_outcomes` — per-slot classification (epoch+slot PK, outcome: forged/battle/missed, opponent pool ID for battles)
 
 ## Config
 
@@ -249,6 +258,9 @@ goduckbot version               # Show version info
 goduckbot leaderlog <epoch>     # Calculate leaderlog for single epoch
 goduckbot leaderlog <N>-<M>     # Calculate leaderlog for epoch range (max 10)
 goduckbot nonce <epoch>         # Show epoch nonce
+goduckbot history               # Build leaderlog history with slot classification
+goduckbot history --force       # Re-classify already-processed epochs
+goduckbot history --from N      # Start from epoch N (overrides auto-detect)
 goduckbot help                  # Show usage
 ```
 
@@ -339,6 +351,21 @@ Test files:
 - ~2 hours total for full historical sync
 - ~2 GB PostgreSQL database size
 
+## Koios REST API
+
+Direct REST calls use `koiosRestBase` constant (`https://koios.tosidrop.me/api/v1`) with RPC parameter syntax (`_epoch_no=N`, `_pool_bech32=ID`). All calls go through `koiosGetWithRetry` (max 5 retries, exponential backoff on 429/503) using `koiosHTTPClient` (shared `http.Client` with 30s timeout). The Go client (`koios-go-client/v3`) is still used for startup pool info and some live queries.
+
+## History Classification
+
+Background job (`buildLeaderlogHistory`) that runs after nonce backfill in full mode. Classifies every assigned leader slot from pool registration through current epoch as forged, slot battle, or missed.
+
+- **Resumable**: checks `IsEpochClassified` per epoch, skips already-done work
+- **CPraos only**: starts from Babbage era (mainnet epoch 365, preprod epoch 12)
+- **Data sources**: local DB for nonces and forged slots, Koios REST for pool/total stake
+- **Slot classification**: forged (in local blocks table at assigned slot), battle (different block exists at slot), missed (no block at slot)
+- **Own context**: 12-hour timeout, independent from the nonce backfill context
+- **Rate**: ~75s/epoch on average due to Koios rate limiting
+
 ## Current K8s Deployment State
 
 - **Pod**: `goduckbot` on `k3s-control-1`
@@ -346,7 +373,7 @@ Test files:
 - **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000`
 - **DB**: PostgreSQL `goduckbot_v2` on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
 - **Mode**: full, leaderlog enabled, telegram enabled, twitter enabled
-- **Image**: `wcatz/goduckbot:3.0.0`
+- **Image**: `wcatz/goduckbot:3.0.16`
 - **Chart**: 0.7.16
 - **Duck media**: gif
 - **Known issue**: NtC stake queries timeout (Koios fallback working)
