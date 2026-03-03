@@ -1862,6 +1862,9 @@ func pct(n, total int) float64 {
 	return float64(n) / float64(total) * 100
 }
 
+// koiosHTTPClient is a shared HTTP client with a 30-second timeout for Koios REST calls.
+var koiosHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // koiosGetWithRetry performs a GET request to Koios with retry on 429/503.
 // Retries up to 5 times with exponential backoff (5s, 10s, 20s, 40s, 60s).
 func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
@@ -1871,8 +1874,11 @@ func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("creating request: %w", err)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := koiosHTTPClient.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, fmt.Errorf("koios HTTP request: %w", err)
 		}
 		body, err := io.ReadAll(resp.Body)

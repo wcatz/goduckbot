@@ -967,7 +967,7 @@ func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := koiosHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("koios HTTP request: %w", err)
 	}
@@ -1010,7 +1010,7 @@ func (nt *NonceTracker) fetchLastBlockHashFromKoios(ctx context.Context, epoch i
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := koiosHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("koios HTTP request: %w", err)
 	}
