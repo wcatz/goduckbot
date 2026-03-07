@@ -935,13 +935,13 @@ func TestKoiosEpochNonceVerification(t *testing.T) {
 
 	passed := 0
 	failed := 0
-	errors := 0
+	apiErrors := 0
 
 	for _, epoch := range epochs {
 		nonceHex, err := fetchKoiosNonce(epoch)
 		if err != nil {
 			t.Logf("Epoch %d: KOIOS ERROR: %v", epoch, err)
-			errors++
+			apiErrors++
 			continue
 		}
 
@@ -961,17 +961,17 @@ func TestKoiosEpochNonceVerification(t *testing.T) {
 		t.Logf("Epoch %d: OK  %s...", epoch, nonceHex[:16])
 		passed++
 
-		// Rate limit
-		time.Sleep(100 * time.Millisecond)
+		// Rate limit to avoid 429s from public Koios API
+		time.Sleep(1500 * time.Millisecond)
 	}
 
-	t.Logf("\n=== Koios Verification: %d passed, %d failed, %d errors ===", passed, failed, errors)
+	t.Logf("\n=== Koios Verification: %d passed, %d failed, %d errors ===", passed, failed, apiErrors)
 
 	if failed > 0 {
 		t.Fatalf("%d epochs had invalid nonces", failed)
 	}
-	if errors > 3 {
-		t.Fatalf("too many Koios errors: %d", errors)
+	if passed == 0 {
+		t.Fatalf("all Koios requests failed: %d errors", apiErrors)
 	}
 }
 

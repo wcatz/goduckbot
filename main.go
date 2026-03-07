@@ -254,8 +254,12 @@ func (i *Indexer) Start() error {
 	}
 	i.duckCustomUrl = viper.GetString("duck.customUrl")
 	// Store the node addresses hosts into the array nodeAddresses in the Indexer
-	i.nodeAddresses = viper.GetStringSlice("nodeAddress.host1")
-	i.nodeAddresses = append(i.nodeAddresses, viper.GetStringSlice("nodeAddress.host2")...)
+	if h1 := viper.GetString("nodeAddress.host1"); h1 != "" {
+		i.nodeAddresses = append(i.nodeAddresses, h1)
+	}
+	if h2 := viper.GetString("nodeAddress.host2"); h2 != "" {
+		i.nodeAddresses = append(i.nodeAddresses, h2)
+	}
 
 	// Mode: "lite" (default) or "full"
 	i.mode = viper.GetString("mode")
@@ -2093,7 +2097,7 @@ func main() {
 		log.Fatalf("failed to start: %s", err)
 	}
 
-	// Wait for all goroutines to finish before exiting
-	globalIndexer.wg.Wait()
+	// Start() blocks forever in the adder pipeline loop.
+	// This select{} is a safety net in case Start() is refactored to return.
 	select {}
 }
