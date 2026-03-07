@@ -29,5 +29,6 @@ duckBot
 vrf.skey
 keys/
 
-# OMP config (local overrides)
+# AI agent config (local only)
+.claude/
 .omp/settings.local.json
