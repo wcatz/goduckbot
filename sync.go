@@ -18,6 +18,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 // Shelley intersect points: last Byron block per network.
@@ -86,16 +87,20 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	)
 
 	// Connect to node via NtN (required for TCP connections)
-	// Keepalive disabled during historical sync: blocks flow continuously via
-	// pipelined ChainSync, so connection liveness is implicitly proven. The
-	// default keepalive (60s period / 10s timeout) causes spurious disconnects
-	// when the node is too busy serving our chain sync to respond to probes.
-	// The retry loop handles actual connection failures.
+	// Keepalive required: cardano-node's muxer expects keepalive probes from
+	// the client and kills the connection after ~97s of inactivity.
+	// Period=30s sends probes often enough to satisfy the node.
+	// Timeout=90s is generous for response time during heavy ChainSync.
+	keepAliveCfg := keepalive.NewConfig(
+		keepalive.WithPeriod(30*time.Second),
+		keepalive.WithTimeout(90*time.Second),
+	)
 	errChan := make(chan error, 1)
 	conn, connErr := ouroboros.NewConnection(
 		ouroboros.WithNetworkMagic(uint32(s.networkMagic)),
 		ouroboros.WithNodeToNode(true),
-		ouroboros.WithKeepAlive(false),
+		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(keepAliveCfg),
 		ouroboros.WithChainSyncConfig(chainSyncCfg),
 		ouroboros.WithErrorChan(errChan),
 	)

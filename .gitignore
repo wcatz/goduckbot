@@ -28,3 +28,6 @@ duckBot
 *.vkey
 vrf.skey
 keys/
+
+# OMP config (local overrides)
+.omp/settings.local.json
