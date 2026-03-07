@@ -204,29 +204,21 @@ sqlite3 goduckbot-dev.db "DELETE FROM leader_schedules WHERE epoch = 612;"
 # 1. Edit config.yaml: mode: "full"
 # 2. Clear DB
 rm goduckbot-dev.db
-# 3. Run (will take ~2 hours for full Shelley-to-tip sync)
-./goduckbot
-
-# Watch progress
-tail -f logs  # or wherever you redirect output
+# Watch progress in logs
+tail -f <log-file>  # or check terminal output
 ```
 
-### Profile Performance
+### Monitor Resources
 
 ```bash
-# CPU profile
-go build -o goduckbot .
-./goduckbot &
-PID=$!
-go tool pprof -http=:8080 http://localhost:8081/debug/pprof/profile?seconds=30
+# CPU and memory usage
+top -p $(pgrep goduckbot)
 
-# Memory profile
-go tool pprof -http=:8080 http://localhost:8081/debug/pprof/heap
+# Or use htop for better visualization
+htop -p $(pgrep goduckbot)
 
-# Goroutine profile
-go tool pprof -http=:8080 http://localhost:8081/debug/pprof/goroutine
-
-kill $PID
+# Watch goroutine count (requires code changes to expose metrics)
+# goduckbot does not have built-in pprof endpoints
 ```
 
 ## Troubleshooting
@@ -273,8 +265,10 @@ watch -n 1 'ps aux | grep goduckbot'
 # Reduce batch size in code (db.go: InsertBlockBatch)
 # Or increase available memory
 
-# Check for goroutine leaks
-curl http://localhost:8081/debug/pprof/goroutine?debug=1
+# goduckbot does not expose profiling endpoints by default
+# Use Go's built-in tools for goroutine analysis:
+#   go build -race  # race detector
+#   GODEBUG=schedtrace=1000 ./goduckbot  # scheduler trace
 ```
 
 ## Next Steps

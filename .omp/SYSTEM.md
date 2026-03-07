@@ -310,18 +310,17 @@ helmfile -e apps -l app=goduckbot apply
 ## Tests
 
 ```bash
-go test ./... -v    # 30 tests
+go test ./... -v    # 72 tests
 go vet ./...
 helm lint helm-chart/
 ```
 
 Test files:
-- `store_test.go` — SQLite Store operations (in-memory `:memory:` DB)
-- `nonce_test.go` — VRF nonce hashing, nonce evolution, genesis seed
-- `nonce_koios_test.go` — Nonce verification against Koios API
-- `leaderlog_test.go` — SlotToEpoch (all networks), round-trip, formatNumber
-- `epoch467_test.go` — End-to-end leaderlog calculation for mainnet epoch 467
-- `epoch612_integration_test.go` — Integration test for epoch 612 leaderlog
+- `comprehensive_test.go` — CPraos algorithm, slot math, VRF, threshold calculations (41 tests)
+- `store_test.go` — SQLite Store operations (in-memory `:memory:` DB) (13 tests)
+- `nonce_test.go` — VRF nonce hashing, nonce evolution, genesis seed (11 tests)
+- `leaderlog_test.go` — SlotToEpoch (all networks), round-trip, formatNumber (6 tests)
+- `nonce_koios_test.go` — Nonce verification against Koios API (1 integration test)
 
 ## Key Dependencies
 - `blinklabs-io/adder` v0.37.1-pre (commit 460d03e) — live chain tail with auto-reconnect
@@ -336,7 +335,7 @@ Test files:
 **Historical sync pipeline (full mode):**
 1. `sync.go` ChainSync reads blocks from cardano-node via gouroboros NtN (pipeline limit 50)
 2. Blocks sent to buffered channel (10,000 capacity) — decouples network I/O from DB writes
-3. Batch processor goroutine in `main.go` drains channel (1000 blocks or 2-second timeout)
+3. Batch processor goroutine in `main.go` drains channel (2000 blocks or 2-second timeout)
 4. `nonce.go` ProcessBatch() evolves nonce in-memory for entire batch
 5. `db.go` PgStore.InsertBlockBatch() persists via temp staging table + CopyFrom:
    - `CREATE TEMP TABLE blocks_staging (...) ON COMMIT DROP`
@@ -345,11 +344,13 @@ Test files:
 6. Unlimited retry loop with capped backoff (5s-30s) on keep-alive timeouts
 7. Keep-alive tuned to 120s period / 30s timeout
 
-**Measured performance:**
-- ~1,800 avg blk/s sustained over full Shelley-to-tip sync (with retries)
-- ~8.56M blocks across 406 epochs (208-613)
-- ~2 hours total for full historical sync
-- ~2 GB PostgreSQL database size
+**Projected performance** (based on partial sync data):
+- ~1,800 avg blk/s sustained (observed during epochs 208-250)
+- ~8.5M blocks estimated for full Shelley-to-tip sync (epochs 208-current)
+- ~2-3 hours projected for full historical sync
+- ~2 GB PostgreSQL database size (estimated after full sync)
+
+**Note**: These are projections based on observed metrics during partial sync, not complete measurements.
 
 ## Koios REST API
 

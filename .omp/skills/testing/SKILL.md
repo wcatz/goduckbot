@@ -14,18 +14,18 @@ Comprehensive testing guide for goduckbot.
 go test ./... -v | grep -E "^(=== RUN|--- PASS|--- FAIL)"
 
 # Count
-go test ./... -v 2>&1 | grep -c "^=== RUN"  # 30 tests total
+go test ./... -v 2>&1 | grep -c "^=== RUN"  # 72 tests total
 ```
 
 ### Test Files
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `store_test.go` | 14 | SQLite Store operations (in-memory `:memory:`) |
-| `nonce_test.go` | 7 | VRF nonce hashing, evolution, genesis seed |
+| `comprehensive_test.go` | 41 | CPraos algorithm, slot math, VRF, threshold calculations |
+| `store_test.go` | 13 | SQLite Store operations (in-memory `:memory:`) |
+| `nonce_test.go` | 11 | VRF nonce hashing, evolution, genesis seed |
+| `leaderlog_test.go` | 6 | SlotToEpoch, epoch math, formatting |
 | `nonce_koios_test.go` | 1 | Nonce verification against Koios API (integration) |
-| `leaderlog_test.go` | 7 | SlotToEpoch, epoch math, formatting |
-| `comprehensive_test.go` | 30 | End-to-end: slot math, VRF, thresholds, CPraos |
 
 ## Running Tests
 
