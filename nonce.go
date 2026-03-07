@@ -223,6 +223,21 @@ func (nt *NonceTracker) ProcessBatch(blocks []BlockData) {
 			nt.candidateFroze = false
 		}
 
+		// Freeze candidate nonce at the stability window BEFORE evolving,
+		// matching ProcessBlock and the Cardano node's behavior.
+		if !nt.candidateFroze {
+			epochStart := GetEpochStartSlot(b.Epoch, nt.networkMagic)
+			stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(b.Epoch, nt.networkMagic)
+			if b.Slot >= stabilitySlot {
+				nt.candidateFroze = true
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if storeErr := nt.store.SetCandidateNonce(ctx, b.Epoch, nt.evolvingNonce); storeErr != nil {
+					log.Printf("Failed to freeze candidate nonce for epoch %d: %v", b.Epoch, storeErr)
+				}
+				cancel()
+			}
+		}
+
 		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, nt.networkMagic)
 		nt.evolvingNonce = evolveNonce(nt.evolvingNonce, nonceValue)
 		nt.blockCount++
@@ -647,7 +662,7 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 			candidateFrozen = false
 		}
 
-		// Freeze candidate at stability window
+		// Freeze candidate at stability window and persist it
 		if !candidateFrozen {
 			epochStart := GetEpochStartSlot(epoch, nt.networkMagic)
 			stabilitySlot := epochStart + StabilityWindowSlotsForEpoch(epoch, nt.networkMagic)
@@ -655,6 +670,9 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 				etaC = make([]byte, 32)
 				copy(etaC, etaV)
 				candidateFrozen = true
+				if storeErr := nt.store.SetCandidateNonce(ctx, epoch, etaC); storeErr != nil {
+					log.Printf("Backfill: failed to store candidate nonce for epoch %d: %v", epoch, storeErr)
+				}
 			}
 		}
 

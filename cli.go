@@ -384,7 +384,28 @@ func cmdCLIHistory(args []string) int {
 	curEpoch := calcCurrentEpoch(cc.networkMagic)
 	endEpoch := curEpoch - 1
 
-	log.Printf("[history] Classifying epochs %d-%d (force=%v)", startEpoch, endEpoch, force)
+	// Count how many epochs need processing
+	totalEpochs := endEpoch - startEpoch + 1
+	needWork := totalEpochs
+	if !force {
+		for e := startEpoch; e <= endEpoch; e++ {
+			if cc.store.IsEpochClassified(ctx, e) {
+				needWork--
+			}
+		}
+	}
+
+	if needWork == 0 {
+		fmt.Printf("All %d epochs (%d-%d) already classified. Use --force to reclassify.\n",
+			totalEpochs, startEpoch, endEpoch)
+		return 0
+	}
+
+	// ~5s per epoch (Koios API calls + rate limit sleeps)
+	estDuration := time.Duration(needWork) * 5 * time.Second
+	fmt.Printf("History classification: %d epochs to process (%d-%d), %d already done\n",
+		needWork, startEpoch, endEpoch, totalEpochs-needWork)
+	fmt.Printf("Estimated time: %v\n\n", estDuration.Round(time.Second))
 
 	epochLength := GetEpochLength(cc.networkMagic)
 	slotToTimeFn := makeSlotToTime(cc.networkMagic)

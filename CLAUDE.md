@@ -357,14 +357,21 @@ Direct REST calls use `koiosRestBase` constant (`https://koios.tosidrop.me/api/v
 
 ## History Classification
 
-Background job (`buildLeaderlogHistory`) that runs after nonce backfill in full mode. Classifies every assigned leader slot from pool registration through current epoch as forged, slot battle, or missed.
+Background job (`buildLeaderlogHistory`) that runs after nonce backfill in full mode. Also available as CLI command (`goduckbot history`). Classifies every assigned leader slot from pool registration through current epoch as forged, slot battle, or missed.
 
 - **Resumable**: checks `IsEpochClassified` per epoch, skips already-done work
 - **CPraos only**: starts from Babbage era (mainnet epoch 365, preprod epoch 12)
-- **Data sources**: local DB for nonces and forged slots, Koios REST for pool/total stake
-- **Slot classification**: forged (in local blocks table at assigned slot), battle (different block exists at slot), missed (no block at slot)
-- **Own context**: 12-hour timeout, independent from the nonce backfill context
-- **Rate**: ~75s/epoch on average due to Koios rate limiting
+- **Data sources**: Koios REST for pool-specific forged slots (`fetchPoolForgedSlots` via `pool_blocks` endpoint), pool/total stake; local DB for nonces and `HasBlockAtSlot` (battle detection)
+- **Slot classification**: forged (in Koios pool_blocks for our pool), battle (different pool's block exists at slot via `HasBlockAtSlot`), missed (no block at slot from any pool)
+- **Own context**: 12-hour timeout (daemon mode), independent from the nonce backfill context
+- **CLI mode**: shows estimated time before starting (~5s/epoch), no timeout
+- **Rate**: ~75s/epoch in daemon (Koios rate limiting on tosidrop), ~5s/epoch in CLI (direct Koios API)
+
+### Classification Limitations
+
+- **Slot battles** (Δ=0): correctly detected — another pool's block at our assigned slot
+- **Height battles** (Δ>0): NOT detectable from chain data — our block was orphaned, winner at different slot. These appear as "missed" in classification. Only visible via external orphan data (e.g., AdaStat, Pooltool)
+- **Lifetime stats (OTG, 251 epochs)**: 4,454 forged, 115 slot battles, 19 known height battles (from AdaStat), 35 truly missed. 96.34% forge rate
 
 ## Current K8s Deployment State
 
@@ -373,7 +380,7 @@ Background job (`buildLeaderlogHistory`) that runs after nonce backfill in full 
 - **NtC**: `cardano-node-mainnet-az1.cardano.svc.cluster.local:30000`
 - **DB**: PostgreSQL `goduckbot_v2` on CNPG cluster (`k3s-postgres-rw.postgres.svc.cluster.local`)
 - **Mode**: full, leaderlog enabled, telegram enabled, twitter enabled
-- **Image**: `wcatz/goduckbot:3.0.16`
+- **Image**: `wcatz/goduckbot:3.0.17`
 - **Chart**: 0.7.16
 - **Duck media**: gif
 - **Known issue**: NtC stake queries timeout (Koios fallback working)

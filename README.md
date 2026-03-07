@@ -14,7 +14,7 @@ A Cardano stake pool companion. Block notifications, leader schedule, epoch nonc
 
 **Epoch Nonces** — In full mode, streams every block from Shelley genesis extracting VRF outputs per era, evolving the nonce via BLAKE2b-256 concatenation, and freezing at the stability window. Backfills ~400 epochs in under 2 minutes.
 
-**Leaderlog History** — In full mode, retroactively classifies every assigned leader slot as forged, slot battle, or missed. Runs as a resumable background job after nonce backfill.
+**Leaderlog History** — Retroactively classifies every assigned leader slot as forged, slot battle, or missed. Uses Koios pool_blocks for pool-specific forge detection and local chain data for battle detection. Runs as a resumable background job (daemon) or CLI command with time estimate. Note: only slot battles (same slot) are detectable — height battles (different slot, VRF tiebreak) require external orphan data.
 
 **Stake Queries** — Direct NtC local state query to your cardano-node for mark/set/go stake snapshots. Falls back to Koios if NtC is unavailable.
 
