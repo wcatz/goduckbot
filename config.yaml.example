@@ -54,6 +54,15 @@ leaderlog:
   # backfillSchedules: false    # After nonce backfill, calculate and store leader schedules
   #                              # for all historical epochs where nonce data is available.
 
+# Koios API configuration
+# By default, goduckbot uses the public koios.rest endpoints:
+#   mainnet: https://api.koios.rest/api/v1
+#   preprod: https://preprod.koios.rest/api/v1
+#   preview: https://preview.koios.rest/api/v1
+# Set koios.url to point at a private Koios mirror (applies to all networks).
+#koios:
+#  url: "https://your-private-koios-mirror.example.com/api/v1"
+
 # Database configuration (only used when leaderlog.enabled is true)
 database:
   driver: "sqlite"              # "sqlite" (default) or "postgres"

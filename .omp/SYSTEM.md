@@ -354,7 +354,7 @@ Test files:
 
 ## Koios REST API
 
-Direct REST calls use `koiosRestBase` constant (`https://koios.tosidrop.me/api/v1`) with RPC parameter syntax (`_epoch_no=N`, `_pool_bech32=ID`). All calls go through `koiosGetWithRetry` (max 5 retries, exponential backoff on 429/503) using `koiosHTTPClient` (shared `http.Client` with 30s timeout). The Go client (`koios-go-client/v3`) is still used for startup pool info and some live queries.
+Direct REST calls use `koiosRESTBase(networkMagic)` helper (defaults to public koios.rest endpoints, overridable via `koios.url` config) with RPC parameter syntax (`_epoch_no=N`, `_pool_bech32=ID`). All calls go through `koiosGetWithRetry` (max 5 retries, exponential backoff on 429/503) using `koiosHTTPClient` (shared `http.Client` with 30s timeout). The Go client (`koios-go-client/v3`) is still used for startup pool info and some live queries.
 
 ## History Classification
 
@@ -366,7 +366,7 @@ Background job (`buildLeaderlogHistory`) that runs after nonce backfill in full 
 - **Slot classification**: forged (in Koios pool_blocks for our pool), battle (different pool's block exists at slot via `HasBlockAtSlot`), missed (no block at slot from any pool)
 - **Own context**: 12-hour timeout (daemon mode), independent from the nonce backfill context
 - **CLI mode**: shows estimated time before starting (~5s/epoch), no timeout
-- **Rate**: ~75s/epoch in daemon (Koios rate limiting on tosidrop), ~5s/epoch in CLI (direct Koios API)
+- **Rate**: ~75s/epoch in daemon (Koios rate limiting on api.koios.rest), ~5s/epoch in CLI (direct Koios API)
 
 ### Classification Limitations
 

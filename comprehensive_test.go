@@ -949,7 +949,7 @@ func TestKoiosStakeDataAvailable(t *testing.T) {
 
 	for _, epoch := range epochs {
 		// Fetch pool stake
-		url := fmt.Sprintf("https://api.koios.rest/api/v1/pool_history?_pool_bech32=%s&_epoch_no=%d", poolBech32, epoch)
+		url := fmt.Sprintf(koiosRESTBase(MainnetNetworkMagic)+"/pool_history?_pool_bech32=%s&_epoch_no=%d", poolBech32, epoch)
 		resp, err := http.Get(url)
 		if err != nil {
 			t.Logf("Epoch %d pool_history: NETWORK ERROR: %v", epoch, err)
@@ -992,7 +992,7 @@ func TestKoiosLastBlockHash(t *testing.T) {
 	epochs := []int{400, 450, 500, 550, 600}
 
 	for _, epoch := range epochs {
-		url := fmt.Sprintf("https://api.koios.rest/api/v1/blocks?epoch_no=eq.%d&order=block_height.desc&limit=1&select=hash,epoch_no,block_height", epoch)
+		url := fmt.Sprintf(koiosRESTBase(MainnetNetworkMagic)+"/blocks?epoch_no=eq.%d&order=block_height.desc&limit=1&select=hash,epoch_no,block_height", epoch)
 		resp, err := http.Get(url)
 		if err != nil {
 			t.Logf("Epoch %d: NETWORK ERROR: %v", epoch, err)

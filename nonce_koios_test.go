@@ -122,7 +122,7 @@ func TestNonceVsKoios(t *testing.T) {
 }
 
 func fetchKoiosNonce(epoch int) (string, error) {
-	url := fmt.Sprintf("https://api.koios.rest/api/v1/epoch_params?_epoch_no=%d&select=nonce", epoch)
+	url := fmt.Sprintf(koiosRESTBase(MainnetNetworkMagic)+"/epoch_params?_epoch_no=%d&select=nonce", epoch)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err

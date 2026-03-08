@@ -63,15 +63,37 @@ const (
 )
 
 // koiosRESTBase returns the Koios REST API base URL for the given network magic.
-// Used by history/backfill helpers that call Koios REST directly instead of via the Go client.
+// Operators running a private Koios mirror can override via koios.url in config.
 func koiosRESTBase(networkMagic int) string {
+	if override := viper.GetString("koios.url"); override != "" {
+		return override
+	}
 	switch networkMagic {
 	case PreprodNetworkMagic:
 		return "https://preprod.koios.rest/api/v1"
 	case PreviewNetworkMagic:
 		return "https://preview.koios.rest/api/v1"
 	default:
-		return "https://koios.tosidrop.me/api/v1"
+		return "https://api.koios.rest/api/v1"
+	}
+}
+
+// koiosClientHost returns the hostname for the Koios Go client.
+// Extracts the host from koios.url config override if set, otherwise uses the
+// public koios.rest endpoint for the network.
+func koiosClientHost(networkMagic int) string {
+	if rawURL := viper.GetString("koios.url"); rawURL != "" {
+		if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+			return parsed.Host
+		}
+	}
+	switch networkMagic {
+	case PreprodNetworkMagic:
+		return koios.PreProdHost
+	case PreviewNetworkMagic:
+		return koios.PreviewHost
+	default:
+		return koios.MainnetHost
 	}
 }
 
@@ -381,31 +403,10 @@ func (i *Indexer) Start() error {
 		log.Println("Twitter notifications disabled via config")
 	}
 
-	/// Initialize the koios client based on networkMagic number
-	if i.networkMagic == PreprodNetworkMagic {
-		i.koios, e = koios.New(
-			koios.Host(koios.PreProdHost),
-			koios.APIVersion("v1"),
-		)
-		if e != nil {
-			log.Fatal(e)
-		}
-	} else if i.networkMagic == PreviewNetworkMagic {
-		i.koios, e = koios.New(
-			koios.Host(koios.PreviewHost),
-			koios.APIVersion("v1"),
-		)
-		if e != nil {
-			log.Fatal(e)
-		}
-	} else {
-		i.koios, e = koios.New(
-			koios.Host(koios.MainnetHost),
-			koios.APIVersion("v1"),
-		)
-		if e != nil {
-			log.Fatal(e)
-		}
+	// Initialize Koios client; host defaults to public koios.rest, overridable via koios.url
+	i.koios, e = koios.New(koios.Host(koiosClientHost(i.networkMagic)), koios.APIVersion("v1"))
+	if e != nil {
+		log.Fatal(e)
 	}
 
 	i.epoch = i.getCurrentEpoch()
