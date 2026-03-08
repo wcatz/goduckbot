@@ -59,4 +59,6 @@ twitter:
   enabled: false
 ```
 
-Or omit the `twitter` block entirely — the bot will not attempt any Twitter API calls.
+Setting `enabled: false` is the only guaranteed hard-disable. If `twitter.enabled` is omitted
+from config entirely, the bot treats it as enabled for backward compatibility — meaning Twitter
+will post if the `TWITTER_*` environment variables are set.

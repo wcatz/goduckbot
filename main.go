@@ -60,9 +60,20 @@ const (
 	StartingEpoch       = 208
 	maxRetryDuration    = time.Minute
 
-	// koiosRestBase is the base URL for direct Koios REST API calls.
-	koiosRestBase = "https://koios.tosidrop.me/api/v1"
 )
+
+// koiosRESTBase returns the Koios REST API base URL for the given network magic.
+// Used by history/backfill helpers that call Koios REST directly instead of via the Go client.
+func koiosRESTBase(networkMagic int) string {
+	switch networkMagic {
+	case PreprodNetworkMagic:
+		return "https://preprod.koios.rest/api/v1"
+	case PreviewNetworkMagic:
+		return "https://preview.koios.rest/api/v1"
+	default:
+		return "https://koios.tosidrop.me/api/v1"
+	}
+}
 
 // Channel to broadcast block events to connected clients
 var clients = make(map[*websocket.Conn]bool) // connected clients
@@ -1713,7 +1724,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 		babbageStart = PreprodBabbageStartEpoch
 	}
 
-	regEpoch, err := fetchPoolRegistrationEpoch(ctx, i.bech32PoolId)
+	regEpoch, err := fetchPoolRegistrationEpoch(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId)
 	if err != nil {
 		return fmt.Errorf("fetching pool registration epoch: %w", err)
 	}
@@ -1765,7 +1776,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 				time.Sleep(time.Second)
 			}
 
-			poolStake, psErr := fetchPoolStakeFromKoios(ctx, i.bech32PoolId, epoch)
+			poolStake, psErr := fetchPoolStakeFromKoios(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId, epoch)
 			if psErr != nil {
 				log.Printf("[history] epoch %d: pool stake failed: %v", epoch, psErr)
 				failed++
@@ -1773,7 +1784,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 			}
 			time.Sleep(time.Second)
 
-			totalStake, tsErr := fetchTotalStakeFromKoios(ctx, epoch)
+			totalStake, tsErr := fetchTotalStakeFromKoios(ctx, koiosRESTBase(i.networkMagic), epoch)
 			if tsErr != nil {
 				log.Printf("[history] epoch %d: total stake failed: %v", epoch, tsErr)
 				failed++
@@ -1807,7 +1818,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 
 		// Get OUR pool's forged slots from Koios (local blocks table has all
 		// pools' blocks, so it can't distinguish our forges from others')
-		forgedSet, fErr := fetchPoolForgedSlots(ctx, i.bech32PoolId, epoch)
+		forgedSet, fErr := fetchPoolForgedSlots(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId, epoch)
 		if fErr != nil {
 			log.Printf("[history] epoch %d: pool forged slots failed: %v", epoch, fErr)
 			forgedSet = make(map[uint64]bool)
@@ -1921,8 +1932,8 @@ func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
 }
 
 // fetchPoolRegistrationEpoch queries Koios for the earliest pool registration epoch.
-func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, error) {
-	url := fmt.Sprintf(koiosRestBase+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
+func fetchPoolRegistrationEpoch(ctx context.Context, baseURL, bech32PoolId string) (int, error) {
+	url := fmt.Sprintf(baseURL+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1942,8 +1953,8 @@ func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, 
 }
 
 // fetchPoolStakeFromKoios returns the pool's active stake for the given epoch via Koios REST API.
-func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int) (uint64, error) {
-	url := fmt.Sprintf(koiosRestBase+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
+func fetchPoolStakeFromKoios(ctx context.Context, baseURL, bech32PoolId string, epoch int) (uint64, error) {
+	url := fmt.Sprintf(baseURL+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1965,8 +1976,8 @@ func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int
 }
 
 // fetchTotalStakeFromKoios returns the total network active stake for the given epoch via Koios REST API.
-func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
-	url := fmt.Sprintf(koiosRestBase+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
+func fetchTotalStakeFromKoios(ctx context.Context, baseURL string, epoch int) (uint64, error) {
+	url := fmt.Sprintf(baseURL+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1988,8 +1999,8 @@ func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
 }
 
 // fetchPoolForgedSlots returns the set of absolute slots where the pool forged a block in the given epoch.
-func fetchPoolForgedSlots(ctx context.Context, bech32PoolId string, epoch int) (map[uint64]bool, error) {
-	url := fmt.Sprintf(koiosRestBase+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
+func fetchPoolForgedSlots(ctx context.Context, baseURL, bech32PoolId string, epoch int) (map[uint64]bool, error) {
+	url := fmt.Sprintf(baseURL+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return nil, err

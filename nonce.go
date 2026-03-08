@@ -969,7 +969,7 @@ func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityRepo
 // fetchNonceFromKoios fetches the epoch nonce from Koios REST API.
 // Uses raw HTTP instead of the Go client to avoid cost_models JSON unmarshal issues.
 func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]byte, error) {
-	url := fmt.Sprintf(koiosRestBase+"/epoch_params?_epoch_no=%d&select=nonce", epoch)
+	url := fmt.Sprintf(koiosRESTBase(nt.networkMagic)+"/epoch_params?_epoch_no=%d&select=nonce", epoch)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
