@@ -308,7 +308,7 @@ CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o goduckbot .
 docker pull wcatz/goduckbot:latest
 ```
 
-Multi-arch images (amd64/arm64) are published to [Docker Hub](https://hub.docker.com/r/wcatz/goduckbot) via GitHub Actions on every merge to master and tagged release.
+ARM64 images are published to [Docker Hub](https://hub.docker.com/r/wcatz/goduckbot) built locally and pushed on every release.
 
 ## Helm Chart
 

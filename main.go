@@ -1085,28 +1085,9 @@ func handleMessages() {
 	}
 }
 
-// getDuckMedia returns a duck media URL and whether it's a GIF.
-// Uses customUrl if set, otherwise fetches from random-d.uk based on media setting.
-func (i *Indexer) getDuckMedia() (string, bool, error) {
-	if i.duckCustomUrl != "" {
-		isGif := strings.HasSuffix(strings.ToLower(i.duckCustomUrl), ".gif")
-		return i.duckCustomUrl, isGif, nil
-	}
-
-	endpoint := "https://random-d.uk/api/v2/random"
-	switch i.duckMedia {
-	case "gif":
-		endpoint += "?type=gif"
-	case "image":
-		endpoint += "?type=jpg"
-	default: // "both" — random-d.uk picks randomly, but we can also randomize
-		if rand.Intn(2) == 0 {
-			endpoint += "?type=gif"
-		} else {
-			endpoint += "?type=jpg"
-		}
-	}
-
+// fetchDuckURL calls the random-d.uk API at the given endpoint and returns
+// the media URL and whether it is a GIF.
+func fetchDuckURL(endpoint string) (string, bool, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(endpoint)
 	if err != nil {
@@ -1128,28 +1109,32 @@ func (i *Indexer) getDuckMedia() (string, bool, error) {
 	return mediaURL, isGif, nil
 }
 
+// getDuckMedia returns a duck media URL and whether it's a GIF.
+// Uses customUrl if set, otherwise fetches from random-d.uk based on media setting.
+func (i *Indexer) getDuckMedia() (string, bool, error) {
+	if i.duckCustomUrl != "" {
+		isGif := strings.HasSuffix(strings.ToLower(i.duckCustomUrl), ".gif")
+		return i.duckCustomUrl, isGif, nil
+	}
+	endpoint := "https://random-d.uk/api/v2/random"
+	switch i.duckMedia {
+	case "gif":
+		endpoint += "?type=gif"
+	case "image":
+		endpoint += "?type=jpg"
+	default: // "both" — randomly pick gif or jpg
+		if rand.Intn(2) == 0 {
+			endpoint += "?type=gif"
+		} else {
+			endpoint += "?type=jpg"
+		}
+	}
+	return fetchDuckURL(endpoint)
+}
+
 // fetchDuckByType fetches a duck with an explicit type ("gif" or "jpg"), ignoring config.
 func (i *Indexer) fetchDuckByType(mediaType string) (string, bool, error) {
-	endpoint := fmt.Sprintf("https://random-d.uk/api/v2/random?type=%s", mediaType)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(endpoint)
-	if err != nil {
-		return "", false, fmt.Errorf("failed to fetch duck media: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("duck API returned status %d", resp.StatusCode)
-	}
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", false, fmt.Errorf("failed to decode duck response: %w", err)
-	}
-	mediaURL, ok := result["url"].(string)
-	if !ok || mediaURL == "" {
-		return "", false, fmt.Errorf("no URL in duck API response")
-	}
-	isGif := strings.HasSuffix(strings.ToLower(mediaURL), ".gif")
-	return mediaURL, isGif, nil
+	return fetchDuckURL(fmt.Sprintf("https://random-d.uk/api/v2/random?type=%s", mediaType))
 }
 
 // Download image from URL to bytes
@@ -1904,7 +1889,7 @@ func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
 
 // fetchPoolRegistrationEpoch queries Koios for the earliest pool registration epoch.
 func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
+	url := fmt.Sprintf(koiosRestBase+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1925,7 +1910,7 @@ func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, 
 
 // fetchPoolStakeFromKoios returns the pool's active stake for the given epoch via Koios REST API.
 func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int) (uint64, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
+	url := fmt.Sprintf(koiosRestBase+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1948,7 +1933,7 @@ func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int
 
 // fetchTotalStakeFromKoios returns the total network active stake for the given epoch via Koios REST API.
 func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
+	url := fmt.Sprintf(koiosRestBase+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1971,7 +1956,7 @@ func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
 
 // fetchPoolForgedSlots returns the set of absolute slots where the pool forged a block in the given epoch.
 func fetchPoolForgedSlots(ctx context.Context, bech32PoolId string, epoch int) (map[uint64]bool, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
+	url := fmt.Sprintf(koiosRestBase+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return nil, err

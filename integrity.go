@@ -15,9 +15,7 @@ import (
 
 // DBIntegrityResult describes the outcome of a startup integrity check.
 type DBIntegrityResult struct {
-	Valid     bool // DB is consistent with chain
 	Truncated bool // DB was corrupt and has been wiped
-	Repaired  bool // Nonce was stale and has been recomputed
 }
 
 // ValidateDBIntegrity checks database consistency against the cardano-node
@@ -38,7 +36,7 @@ func ValidateDBIntegrity(ctx context.Context, store Store, nonceTracker *NonceTr
 	lastSlot, err := store.GetLastSyncedSlot(ctx)
 	if err != nil || lastSlot == 0 {
 		log.Println("Database is empty, skipping integrity check")
-		return DBIntegrityResult{Valid: true}, nil
+		return DBIntegrityResult{}, nil
 	}
 
 	epoch := SlotToEpoch(lastSlot, networkMagic)
@@ -70,7 +68,7 @@ func ValidateDBIntegrity(ctx context.Context, store Store, nonceTracker *NonceTr
 	}
 	if len(blocks) == 0 {
 		log.Println("No blocks in database, skipping chain validation")
-		return DBIntegrityResult{Valid: true}, nil
+		return DBIntegrityResult{}, nil
 	}
 
 	points := make([]pcommon.Point, len(blocks))
@@ -116,11 +114,11 @@ func ValidateDBIntegrity(ctx context.Context, store Store, nonceTracker *NonceTr
 		}
 		log.Printf("Nonce repaired for epoch %d", epoch)
 		log.Printf("Integrity check completed in %v (repaired)", time.Since(start).Round(time.Millisecond))
-		return DBIntegrityResult{Valid: true, Repaired: true}, nil
+		return DBIntegrityResult{}, nil
 	}
 
 	log.Printf("Integrity check passed in %v", time.Since(start).Round(time.Millisecond))
-	return DBIntegrityResult{Valid: true}, nil
+	return DBIntegrityResult{}, nil
 }
 
 // checkIntersectWithNode opens a short-lived NtN connection to cardano-node
