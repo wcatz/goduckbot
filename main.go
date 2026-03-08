@@ -1428,6 +1428,75 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	}
 }
 
+// queryStakeForLeaderlog retrieves pool and total stake for the given target epoch.
+// Tries NtC first with the appropriate mark/set/go snapshot, then falls back to Koios.
+// This is the single authoritative stake-fetch path for all leaderlog calculations.
+// NtC timeout is intentionally short (30s) because NtC is known to time out in some
+// deployments; Koios fallback covers the gap without stalling the leaderlog trigger.
+func (i *Indexer) queryStakeForLeaderlog(ctx context.Context, targetEpoch int) (poolStake, totalStake uint64, err error) {
+	curEpoch := i.getCurrentEpoch()
+
+	// Try NtC if within mark/set/go snapshot range
+	if i.nodeQuery != nil {
+		var snap SnapshotType
+		ntcAvailable := true
+		switch targetEpoch {
+		case curEpoch + 1:
+			snap = SnapshotMark
+		case curEpoch:
+			snap = SnapshotSet
+		case curEpoch - 1:
+			snap = SnapshotGo
+		default:
+			ntcAvailable = false
+		}
+		if ntcAvailable {
+			ntcCtx, ntcCancel := context.WithTimeout(ctx, 30*time.Second)
+			snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
+			ntcCancel()
+			if snapErr != nil {
+				log.Printf("NtC stake query for epoch %d failed: %v", targetEpoch, snapErr)
+			} else {
+				switch snap {
+				case SnapshotMark:
+					poolStake, totalStake = snapshots.PoolStakeMark, snapshots.TotalStakeMark
+				case SnapshotSet:
+					poolStake, totalStake = snapshots.PoolStakeSet, snapshots.TotalStakeSet
+				case SnapshotGo:
+					poolStake, totalStake = snapshots.PoolStakeGo, snapshots.TotalStakeGo
+				}
+				if poolStake > 0 {
+					return poolStake, totalStake, nil
+				}
+			}
+		}
+	}
+
+	// Koios fallback: try target epoch first, then recent epochs
+	if i.koios != nil {
+		for _, tryEpoch := range []int{targetEpoch, curEpoch, curEpoch - 1, curEpoch - 2} {
+			epochNo := koios.EpochNo(tryEpoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr != nil || len(poolHist.Data) == 0 {
+				continue
+			}
+			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr != nil || len(epochInfo.Data) == 0 {
+				poolStake = 0
+				continue
+			}
+			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			if tryEpoch != targetEpoch {
+				log.Printf("Using Koios stake fallback for epoch %d (from epoch %d)", targetEpoch, tryEpoch)
+			}
+			return poolStake, totalStake, nil
+		}
+	}
+
+	return 0, 0, fmt.Errorf("no stake data available for epoch %d from NtC or Koios", targetEpoch)
+}
+
 // calculateAndPostLeaderlog calculates the leader schedule and posts to Telegram.
 // Returns true on success, false on failure (used for cooldown tracking).
 func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
