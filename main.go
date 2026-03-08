@@ -1447,46 +1447,10 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 		return false
 	}
 
-	// Get pool + network stake (NtC mark snapshot first, 5min timeout, Koios fallback)
-	var poolStake, totalStake uint64
-	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
-		snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
-		ntcCancel()
-		if snapErr != nil {
-			log.Printf("NtC stake query failed for auto-leaderlog, trying Koios: %v", snapErr)
-		} else {
-			poolStake = snapshots.PoolStakeMark
-			totalStake = snapshots.TotalStakeMark
-		}
-	}
-	if poolStake == 0 && i.koios != nil {
-		// Koios fallback: try recent completed epochs (Koios may lag 1-2 epochs behind)
-		for _, tryEpoch := range []int{epoch - 1, epoch - 2, epoch - 3} {
-			epochNo := koios.EpochNo(tryEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr != nil {
-				log.Printf("Koios GetPoolHistory(%d) error: %v", tryEpoch, histErr)
-				continue
-			}
-			if len(poolHist.Data) == 0 {
-				log.Printf("Koios GetPoolHistory(%d) returned empty data", tryEpoch)
-				continue
-			}
-			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr != nil || len(epochInfo.Data) == 0 {
-				log.Printf("Koios GetEpochInfo(%d) failed: %v", tryEpoch, infoErr)
-				poolStake = 0
-				continue
-			}
-			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-			log.Printf("Using Koios stake fallback for epoch %d leaderlog (from epoch %d)", epoch, tryEpoch)
-			break
-		}
-	}
-	if poolStake == 0 || totalStake == 0 {
-		log.Printf("No stake data available for epoch %d (pool=%d, total=%d)", epoch, poolStake, totalStake)
+	// Get pool + network stake via the shared helper (NtC mark snapshot first, Koios fallback)
+	poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, epoch)
+	if stakeErr != nil {
+		log.Printf("No stake data available for epoch %d: %v", epoch, stakeErr)
 		return false
 	}
 

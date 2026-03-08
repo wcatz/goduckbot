@@ -5,7 +5,7 @@ goduckbot posts block notifications and leader schedule announcements to Twitter
 ## What's supported
 
 - Text tweets for every block notification
-- GIF or image media attached automatically when `duck.media` is `"gif"`, `"img"`, or `"both"`
+- GIF or image media attached automatically when `duck.media` is `"gif"`, `"image"`, or `"both"`
 - Media upload uses the chunked Twitter v1.1 upload API via gotwi, posted via raw OAuth1 HMAC-SHA256 against `api.x.com`
 - GIFs use `tweet_gif` category; images use `tweet_image` category (JPEG)
 - Falls back to text-only if media download or upload fails — the tweet is never dropped
@@ -32,7 +32,7 @@ twitter:
 
 All four values can also be set via environment variables, which take precedence over config.yaml:
 
-```
+```text
 TWITTER_API_KEY
 TWITTER_API_KEY_SECRET
 TWITTER_ACCESS_TOKEN
@@ -45,11 +45,11 @@ Controlled by the top-level `duck.media` config key — same setting as Telegram
 
 ```yaml
 duck:
-  media: "gif"    # "gif", "img", or "both"
+  media: "gif"    # "gif", "image", or "both"
 ```
 
 - `"gif"` — attaches a GIF from random-d.uk
-- `"img"` — attaches a JPEG image
+- `"image"` — attaches a JPEG image
 - `"both"` — randomly picks GIF or image per notification
 
 ## Disabling
