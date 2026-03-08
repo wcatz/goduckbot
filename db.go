@@ -311,15 +311,6 @@ func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) erro
 	return tx.Commit(ctx)
 }
 
-func (s *PgStore) StreamBlockNonces(ctx context.Context) (BlockNonceRows, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT epoch, slot, nonce_value, block_hash FROM blocks ORDER BY slot`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return &pgBlockNonceRows{rows: rows}, nil
-}
 
 func (s *PgStore) GetBlockByHash(ctx context.Context, hashPrefix string) ([]BlockRecord, error) {
 	rows, err := s.pool.Query(ctx,
@@ -382,46 +373,6 @@ func (s *PgStore) GetLeaderSchedule(ctx context.Context, epoch int) (*LeaderSche
 	}, nil
 }
 
-// pgBlockNonceRows wraps pgx.Rows to implement BlockNonceRows.
-type pgBlockNonceRows struct {
-	rows      pgx.Rows
-	epoch     int
-	slot      uint64
-	nonce     []byte
-	blockHash string
-	err       error
-	closed    bool
-}
-
-func (r *pgBlockNonceRows) Next() bool {
-	if r.closed {
-		return false
-	}
-	if !r.rows.Next() {
-		r.err = r.rows.Err()
-		r.closed = true
-		return false
-	}
-	var slotInt64 int64
-	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce, &r.blockHash)
-	r.slot = uint64(slotInt64)
-	return r.err == nil
-}
-
-func (r *pgBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, blockHash string, err error) {
-	return r.epoch, r.slot, r.nonce, r.blockHash, r.err
-}
-
-func (r *pgBlockNonceRows) Close() {
-	if !r.closed {
-		r.rows.Close()
-		r.closed = true
-	}
-}
-
-func (r *pgBlockNonceRows) Err() error {
-	return r.err
-}
 
 func (s *PgStore) StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error) {
 	rows, err := s.pool.Query(ctx,
@@ -500,24 +451,6 @@ func (s *PgStore) GetBlockCountForEpoch(ctx context.Context, epoch int) (int, er
 	return count, err
 }
 
-func (s *PgStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT nonce_value FROM blocks WHERE epoch = $1 ORDER BY slot`, epoch)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var values [][]byte
-	for rows.Next() {
-		var nonce []byte
-		if err := rows.Scan(&nonce); err != nil {
-			return nil, err
-		}
-		values = append(values, nonce)
-	}
-	return values, rows.Err()
-}
 
 func (s *PgStore) GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error) {
 	rows, err := s.pool.Query(ctx,
@@ -548,15 +481,6 @@ func (s *PgStore) GetCandidateNonce(ctx context.Context, epoch int) ([]byte, err
 	return nonce, nil
 }
 
-func (s *PgStore) GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error) {
-	var hash string
-	err := s.pool.QueryRow(ctx,
-		`SELECT block_hash FROM blocks WHERE epoch = $1 ORDER BY slot DESC LIMIT 1`, epoch).Scan(&hash)
-	if err != nil {
-		return "", err
-	}
-	return hash, nil
-}
 
 // GetPrevHashOfLastBlock returns the block hash of the second-to-last block
 // in the given epoch. This is the prevHash of the last block, which is what

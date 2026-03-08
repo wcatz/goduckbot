@@ -287,30 +287,6 @@ func TestGetBlockCountForEpoch(t *testing.T) {
 	}
 }
 
-func TestGetNonceValuesForEpoch(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// Insert blocks with known nonce values
-	_, _ = store.InsertBlock(ctx, 100, 1, "h1", []byte{1}, []byte{0xAA})
-	_, _ = store.InsertBlock(ctx, 200, 1, "h2", []byte{2}, []byte{0xBB})
-	_, _ = store.InsertBlock(ctx, 300, 2, "h3", []byte{3}, []byte{0xCC})
-
-	values, err := store.GetNonceValuesForEpoch(ctx, 1)
-	if err != nil {
-		t.Fatalf("GetNonceValuesForEpoch: %v", err)
-	}
-	if len(values) != 2 {
-		t.Fatalf("expected 2 values, got %d", len(values))
-	}
-	// Should be ordered by slot (100 then 200)
-	if values[0][0] != 0xAA {
-		t.Fatalf("expected first nonce 0xAA, got 0x%x", values[0][0])
-	}
-	if values[1][0] != 0xBB {
-		t.Fatalf("expected second nonce 0xBB, got 0x%x", values[1][0])
-	}
-}
 
 func TestTruncateAll(t *testing.T) {
 	store := newTestStore(t)
@@ -401,40 +377,5 @@ func TestGetCandidateNonce(t *testing.T) {
 		if got[i] != nonce[i] {
 			t.Fatalf("expected %x, got %x", nonce, got)
 		}
-	}
-}
-
-func TestGetLastBlockHashForEpoch(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	// No blocks — should return error
-	_, err := store.GetLastBlockHashForEpoch(ctx, 200)
-	if err == nil {
-		t.Fatal("expected error for empty epoch")
-	}
-
-	// Insert blocks across two epochs
-	store.InsertBlock(ctx, 100, 200, "hash_a", []byte{1}, []byte{1})
-	store.InsertBlock(ctx, 200, 200, "hash_b", []byte{2}, []byte{2})
-	store.InsertBlock(ctx, 300, 200, "hash_c", []byte{3}, []byte{3})
-	store.InsertBlock(ctx, 400, 201, "hash_d", []byte{4}, []byte{4})
-
-	// Last block of epoch 200 should be hash_c (slot 300)
-	got, err := store.GetLastBlockHashForEpoch(ctx, 200)
-	if err != nil {
-		t.Fatalf("GetLastBlockHashForEpoch: %v", err)
-	}
-	if got != "hash_c" {
-		t.Fatalf("expected hash_c, got %s", got)
-	}
-
-	// Last block of epoch 201 should be hash_d
-	got, err = store.GetLastBlockHashForEpoch(ctx, 201)
-	if err != nil {
-		t.Fatalf("GetLastBlockHashForEpoch epoch 201: %v", err)
-	}
-	if got != "hash_d" {
-		t.Fatalf("expected hash_d, got %s", got)
 	}
 }

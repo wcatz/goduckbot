@@ -389,6 +389,7 @@ func (i *Indexer) cmdEpoch(m *telebot.Message) {
 	i.bot.Send(m.Chat, msg)
 }
 
+
 func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	if !i.isAllowed(m) {
 		return
@@ -417,14 +418,11 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 
 	// Parse argument: "next", "current", or epoch number
 	var targetEpoch int
-	var snapType SnapshotType
 	switch {
 	case args == "next":
 		targetEpoch = i.getCurrentEpoch() + 1
-		snapType = SnapshotMark
 	case args == "current":
 		targetEpoch = i.getCurrentEpoch()
-		snapType = SnapshotSet
 	default:
 		parsed, err := strconv.Atoi(args)
 		if err != nil {
@@ -460,69 +458,9 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			return
 		}
 
-		// Try NtC first if epoch is within snapshot range (mark/set/go)
-		var poolStake, totalStake uint64
-		curEpoch := i.getCurrentEpoch()
-		if i.nodeQuery != nil {
-			var snap SnapshotType
-			ntcAvailable := true
-			switch targetEpoch {
-			case curEpoch + 1:
-				snap = SnapshotMark
-			case curEpoch:
-				snap = SnapshotSet
-			case curEpoch - 1:
-				snap = SnapshotGo
-			default:
-				ntcAvailable = false
-			}
-			if ntcAvailable {
-				ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
-				snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
-				ntcCancel()
-				if snapErr != nil {
-					log.Printf("NtC stake query for epoch %d failed: %v", targetEpoch, snapErr)
-				} else {
-					switch snap {
-					case SnapshotMark:
-						poolStake = snapshots.PoolStakeMark
-						totalStake = snapshots.TotalStakeMark
-					case SnapshotSet:
-						poolStake = snapshots.PoolStakeSet
-						totalStake = snapshots.TotalStakeSet
-					case SnapshotGo:
-						poolStake = snapshots.PoolStakeGo
-						totalStake = snapshots.TotalStakeGo
-					}
-				}
-			}
-		}
-
-		// Koios fallback for epochs outside NtC range or NtC failure
-		if poolStake == 0 && i.koios != nil {
-			curEpoch := i.getCurrentEpoch()
-			for _, tryEpoch := range []int{targetEpoch, curEpoch, curEpoch - 1, curEpoch - 2} {
-				epochNo := koios.EpochNo(tryEpoch)
-				poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-				if histErr != nil || len(poolHist.Data) == 0 {
-					continue
-				}
-				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-				epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-				if infoErr != nil || len(epochInfo.Data) == 0 {
-					poolStake = 0
-					continue
-				}
-				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-				if tryEpoch != targetEpoch {
-					log.Printf("Using Koios stake fallback for /leaderlog %d (from epoch %d)", targetEpoch, tryEpoch)
-				}
-				break
-			}
-		}
-
-		if poolStake == 0 || totalStake == 0 {
-			replyEpoch(fmt.Sprintf("Failed to get stake for epoch %d from NtC or Koios", targetEpoch))
+		poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, targetEpoch)
+		if stakeErr != nil {
+			replyEpoch(fmt.Sprintf("Failed to get stake for epoch %d: %v", targetEpoch, stakeErr))
 			return
 		}
 
@@ -576,51 +514,9 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 		return
 	}
 
-	// Try NtC first for stake data
-	var poolStake, totalStake uint64
-	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
-		snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
-		ntcCancel()
-		if snapErr != nil {
-			log.Printf("NtC stake query for epoch %d failed: %v", targetEpoch, snapErr)
-		} else {
-			switch snapType {
-			case SnapshotSet:
-				poolStake = snapshots.PoolStakeSet
-				totalStake = snapshots.TotalStakeSet
-			default:
-				poolStake = snapshots.PoolStakeMark
-				totalStake = snapshots.TotalStakeMark
-			}
-		}
-	}
-
-	// Koios fallback if NtC unavailable or failed (try recent epochs since Koios may lag)
-	if poolStake == 0 && i.koios != nil {
-		curEpoch := i.getCurrentEpoch()
-		for _, tryEpoch := range []int{curEpoch, curEpoch - 1, curEpoch - 2} {
-			epochNo := koios.EpochNo(tryEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr != nil || len(poolHist.Data) == 0 {
-				continue
-			}
-			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr != nil || len(epochInfo.Data) == 0 {
-				poolStake = 0
-				continue
-			}
-			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-			if tryEpoch != targetEpoch {
-				log.Printf("Using Koios stake fallback for /leaderlog (from epoch %d)", tryEpoch)
-			}
-			break
-		}
-	}
-
-	if poolStake == 0 || totalStake == 0 {
-		reply(fmt.Sprintf("Failed to get stake for epoch %d from NtC or Koios", targetEpoch))
+	poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, targetEpoch)
+	if stakeErr != nil {
+		reply(fmt.Sprintf("Failed to get stake for epoch %d: %v", targetEpoch, stakeErr))
 		return
 	}
 
@@ -994,41 +890,9 @@ func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 			return
 		}
 
-		var poolStake, totalStake uint64
-		if i.nodeQuery != nil {
-			ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
-			snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
-			ntcCancel()
-			if snapErr != nil {
-				log.Printf("NtC stake query failed, trying Koios fallback: %v", snapErr)
-			} else {
-				poolStake = snapshots.PoolStakeSet
-				totalStake = snapshots.TotalStakeSet
-			}
-		}
-		if poolStake == 0 && i.koios != nil {
-			// Try recent epochs (Koios may lag 1-2 epochs behind)
-			for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
-				epochNo := koios.EpochNo(tryEpoch)
-				poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-				if histErr != nil || len(poolHist.Data) == 0 {
-					log.Printf("Koios GetPoolHistory(%d) empty or error: %v", tryEpoch, histErr)
-					continue
-				}
-				poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-				epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-				if infoErr != nil || len(epochInfo.Data) == 0 {
-					log.Printf("Koios GetEpochInfo(%d) failed: %v", tryEpoch, infoErr)
-					poolStake = 0
-					continue
-				}
-				totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-				log.Printf("Using Koios stake fallback for /nextblock (from epoch %d)", tryEpoch)
-				break
-			}
-		}
-		if poolStake == 0 || totalStake == 0 {
-			reply("No stake data available from NtC or Koios")
+		poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, currentEpoch)
+		if stakeErr != nil {
+			reply(fmt.Sprintf("No stake data available: %v", stakeErr))
 			return
 		}
 

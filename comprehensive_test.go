@@ -819,40 +819,6 @@ func TestStoreForgedSlots(t *testing.T) {
 	}
 }
 
-func TestStoreStreamBlockNonces(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-
-	_, _ = store.InsertBlock(ctx, 300, 2, "h3", []byte{3}, []byte{33})
-	_, _ = store.InsertBlock(ctx, 100, 1, "h1", []byte{1}, []byte{11})
-	_, _ = store.InsertBlock(ctx, 200, 1, "h2", []byte{2}, []byte{22})
-
-	rows, err := store.StreamBlockNonces(ctx)
-	if err != nil {
-		t.Fatalf("StreamBlockNonces: %v", err)
-	}
-	defer rows.Close()
-
-	var slots []uint64
-	for rows.Next() {
-		_, slot, _, _, err := rows.Scan()
-		if err != nil {
-			t.Fatalf("Scan: %v", err)
-		}
-		slots = append(slots, slot)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("Err: %v", err)
-	}
-
-	// Should be ordered by slot ASC
-	if len(slots) != 3 {
-		t.Fatalf("expected 3, got %d", len(slots))
-	}
-	if slots[0] != 100 || slots[1] != 200 || slots[2] != 300 {
-		t.Fatalf("slots not in order: %v", slots)
-	}
-}
 
 func TestStoreStreamBlockVrfOutputs(t *testing.T) {
 	store := newTestStore(t)

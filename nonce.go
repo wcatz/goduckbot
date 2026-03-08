@@ -394,9 +394,8 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 			// This matches how ComputeEpochNonce tracks labNonce via prevBlockHash.
 			etaPh, hashErr := nt.store.GetPrevHashOfLastBlock(ctx, etaPhEpoch)
 			if hashErr != nil || etaPh == "" {
-				// Fallback: try GetLastBlockHashForEpoch from the epoch BEFORE etaPhEpoch.
-				// If the epoch only had 1 block, second-to-last doesn't exist.
-				// In that edge case the labNonce at the transition would be from an earlier epoch.
+				// No second-to-last block found; fall through to fetchNonceFromKoios to
+				// retrieve the full epoch nonce directly from the Koios API.
 				log.Printf("TICKN: no second-to-last block for epoch %d, trying Koios for full nonce", etaPhEpoch)
 			}
 			if hashErr == nil && etaPh != "" {
@@ -712,16 +711,6 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 	return nil
 }
 
-// IntegrityResult holds the verification result for a single epoch.
-type IntegrityResult struct {
-	Epoch      int
-	Computed   string // hex
-	DBStored   string // hex, or "n/a"
-	Koios      string // hex, or "n/a"
-	DBMatch    bool
-	KoiosMatch bool
-}
-
 // IntegrityReport is the summary of a full nonce integrity check.
 type IntegrityReport struct {
 	TotalEpochs     int
@@ -980,7 +969,7 @@ func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityRepo
 // fetchNonceFromKoios fetches the epoch nonce from Koios REST API.
 // Uses raw HTTP instead of the Go client to avoid cost_models JSON unmarshal issues.
 func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]byte, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/epoch_params?_epoch_no=%d&select=nonce", epoch)
+	url := fmt.Sprintf(koiosRESTBase(nt.networkMagic)+"/epoch_params?_epoch_no=%d&select=nonce", epoch)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -1018,39 +1007,4 @@ func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]b
 	}
 
 	return nonce, nil
-}
-
-// fetchLastBlockHashFromKoios returns the hash of the last block in the given epoch
-// via the Koios REST API. Used as fallback when local blocks table has gaps.
-func (nt *NonceTracker) fetchLastBlockHashFromKoios(ctx context.Context, epoch int) (string, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/blocks?epoch_no=eq.%d&order=block_height.desc&limit=1&select=hash,epoch_no,block_height", epoch)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
-	}
-	resp, err := koiosHTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("koios HTTP request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("koios returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result []struct {
-		Hash string `json:"hash"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("parsing response: %w", err)
-	}
-	if len(result) == 0 || result[0].Hash == "" {
-		return "", fmt.Errorf("no blocks returned for epoch %d", epoch)
-	}
-
-	return result[0].Hash, nil
 }

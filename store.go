@@ -20,13 +20,6 @@ type BlockData struct {
 	NetworkMagic int
 }
 
-// BlockNonceRows is an iterator over blocks for nonce computation.
-type BlockNonceRows interface {
-	Next() bool
-	Scan() (epoch int, slot uint64, nonceValue []byte, blockHash string, err error)
-	Close()
-	Err() error
-}
 
 // BlockVrfRows is an iterator over blocks returning raw VRF output for integrity checking.
 type BlockVrfRows interface {
@@ -54,14 +47,11 @@ type Store interface {
 	MarkSchedulePosted(ctx context.Context, epoch int) error
 	GetForgedSlots(ctx context.Context, epoch int) ([]uint64, error)
 	GetLastSyncedSlot(ctx context.Context) (uint64, error)
-	StreamBlockNonces(ctx context.Context) (BlockNonceRows, error)
 	StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error)
 	GetLastNBlocks(ctx context.Context, n int) ([]BlockRecord, error)
 	GetBlockCountForEpoch(ctx context.Context, epoch int) (int, error)
-	GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error)
 	GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error)
 	GetCandidateNonce(ctx context.Context, epoch int) ([]byte, error)
-	GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error)
 	GetPrevHashOfLastBlock(ctx context.Context, epoch int) (string, error)
 	UpsertSlotOutcomes(ctx context.Context, epoch int, outcomes []SlotOutcome) error
 	GetSlotOutcomes(ctx context.Context, epoch int) ([]SlotOutcome, error)
@@ -381,15 +371,6 @@ func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) 
 	return tx.Commit()
 }
 
-func (s *SqliteStore) StreamBlockNonces(ctx context.Context) (BlockNonceRows, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT epoch, slot, nonce_value, block_hash FROM blocks ORDER BY slot`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return &sqliteBlockNonceRows{rows: rows}, nil
-}
 
 func (s *SqliteStore) GetBlockByHash(ctx context.Context, hashPrefix string) ([]BlockRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -459,46 +440,6 @@ func (s *SqliteStore) GetLeaderSchedule(ctx context.Context, epoch int) (*Leader
 	}, nil
 }
 
-// sqliteBlockNonceRows wraps sql.Rows to implement BlockNonceRows.
-type sqliteBlockNonceRows struct {
-	rows      *sql.Rows
-	epoch     int
-	slot      uint64
-	nonce     []byte
-	blockHash string
-	err       error
-	closed    bool
-}
-
-func (r *sqliteBlockNonceRows) Next() bool {
-	if r.closed {
-		return false
-	}
-	if !r.rows.Next() {
-		r.err = r.rows.Err()
-		r.closed = true
-		return false
-	}
-	var slotInt64 int64
-	r.err = r.rows.Scan(&r.epoch, &slotInt64, &r.nonce, &r.blockHash)
-	r.slot = uint64(slotInt64)
-	return r.err == nil
-}
-
-func (r *sqliteBlockNonceRows) Scan() (epoch int, slot uint64, nonceValue []byte, blockHash string, err error) {
-	return r.epoch, r.slot, r.nonce, r.blockHash, r.err
-}
-
-func (r *sqliteBlockNonceRows) Close() {
-	if !r.closed {
-		r.rows.Close()
-		r.closed = true
-	}
-}
-
-func (r *sqliteBlockNonceRows) Err() error {
-	return r.err
-}
 
 func (s *SqliteStore) StreamBlockVrfOutputs(ctx context.Context) (BlockVrfRows, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -579,24 +520,6 @@ func (s *SqliteStore) GetBlockCountForEpoch(ctx context.Context, epoch int) (int
 	return count, err
 }
 
-func (s *SqliteStore) GetNonceValuesForEpoch(ctx context.Context, epoch int) ([][]byte, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT nonce_value FROM blocks WHERE epoch = ? ORDER BY slot`, epoch)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var values [][]byte
-	for rows.Next() {
-		var nonce []byte
-		if err := rows.Scan(&nonce); err != nil {
-			return nil, err
-		}
-		values = append(values, nonce)
-	}
-	return values, rows.Err()
-}
 
 func (s *SqliteStore) GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -627,15 +550,6 @@ func (s *SqliteStore) GetCandidateNonce(ctx context.Context, epoch int) ([]byte,
 	return nonce, nil
 }
 
-func (s *SqliteStore) GetLastBlockHashForEpoch(ctx context.Context, epoch int) (string, error) {
-	var hash string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT block_hash FROM blocks WHERE epoch = ? ORDER BY slot DESC LIMIT 1`, epoch).Scan(&hash)
-	if err != nil {
-		return "", err
-	}
-	return hash, nil
-}
 
 // GetPrevHashOfLastBlock returns the block hash of the second-to-last block
 // in the given epoch. This is the prevHash of the last block, which is what

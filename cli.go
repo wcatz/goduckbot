@@ -373,7 +373,7 @@ func cmdCLIHistory(args []string) int {
 	if fromEpoch > 0 {
 		startEpoch = fromEpoch
 	} else {
-		regEpoch, regErr := fetchPoolRegistrationEpoch(ctx, cc.bech32PoolId)
+		regEpoch, regErr := fetchPoolRegistrationEpoch(ctx, koiosRESTBase(cc.networkMagic), cc.bech32PoolId)
 		if regErr != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching pool registration: %v\n", regErr)
 			return 1
@@ -474,7 +474,7 @@ func cmdCLIHistory(args []string) int {
 		}
 
 		// Get OUR pool's forged slots from Koios
-		forgedSet, fErr := fetchPoolForgedSlots(ctx, cc.bech32PoolId, epoch)
+		forgedSet, fErr := fetchPoolForgedSlots(ctx, koiosRESTBase(cc.networkMagic), cc.bech32PoolId, epoch)
 		if fErr != nil {
 			log.Printf("[history] epoch %d: pool forged slots failed: %v", epoch, fErr)
 			forgedSet = make(map[uint64]bool)

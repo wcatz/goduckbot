@@ -60,9 +60,20 @@ const (
 	StartingEpoch       = 208
 	maxRetryDuration    = time.Minute
 
-	// koiosRestBase is the base URL for direct Koios REST API calls.
-	koiosRestBase = "https://koios.tosidrop.me/api/v1"
 )
+
+// koiosRESTBase returns the Koios REST API base URL for the given network magic.
+// Used by history/backfill helpers that call Koios REST directly instead of via the Go client.
+func koiosRESTBase(networkMagic int) string {
+	switch networkMagic {
+	case PreprodNetworkMagic:
+		return "https://preprod.koios.rest/api/v1"
+	case PreviewNetworkMagic:
+		return "https://preview.koios.rest/api/v1"
+	default:
+		return "https://koios.tosidrop.me/api/v1"
+	}
+}
 
 // Channel to broadcast block events to connected clients
 var clients = make(map[*websocket.Conn]bool) // connected clients
@@ -1085,28 +1096,9 @@ func handleMessages() {
 	}
 }
 
-// getDuckMedia returns a duck media URL and whether it's a GIF.
-// Uses customUrl if set, otherwise fetches from random-d.uk based on media setting.
-func (i *Indexer) getDuckMedia() (string, bool, error) {
-	if i.duckCustomUrl != "" {
-		isGif := strings.HasSuffix(strings.ToLower(i.duckCustomUrl), ".gif")
-		return i.duckCustomUrl, isGif, nil
-	}
-
-	endpoint := "https://random-d.uk/api/v2/random"
-	switch i.duckMedia {
-	case "gif":
-		endpoint += "?type=gif"
-	case "image":
-		endpoint += "?type=jpg"
-	default: // "both" — random-d.uk picks randomly, but we can also randomize
-		if rand.Intn(2) == 0 {
-			endpoint += "?type=gif"
-		} else {
-			endpoint += "?type=jpg"
-		}
-	}
-
+// fetchDuckURL calls the random-d.uk API at the given endpoint and returns
+// the media URL and whether it is a GIF.
+func fetchDuckURL(endpoint string) (string, bool, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(endpoint)
 	if err != nil {
@@ -1128,28 +1120,32 @@ func (i *Indexer) getDuckMedia() (string, bool, error) {
 	return mediaURL, isGif, nil
 }
 
+// getDuckMedia returns a duck media URL and whether it's a GIF.
+// Uses customUrl if set, otherwise fetches from random-d.uk based on media setting.
+func (i *Indexer) getDuckMedia() (string, bool, error) {
+	if i.duckCustomUrl != "" {
+		isGif := strings.HasSuffix(strings.ToLower(i.duckCustomUrl), ".gif")
+		return i.duckCustomUrl, isGif, nil
+	}
+	endpoint := "https://random-d.uk/api/v2/random"
+	switch i.duckMedia {
+	case "gif":
+		endpoint += "?type=gif"
+	case "image":
+		endpoint += "?type=jpg"
+	default: // "both" — randomly pick gif or jpg
+		if rand.Intn(2) == 0 {
+			endpoint += "?type=gif"
+		} else {
+			endpoint += "?type=jpg"
+		}
+	}
+	return fetchDuckURL(endpoint)
+}
+
 // fetchDuckByType fetches a duck with an explicit type ("gif" or "jpg"), ignoring config.
 func (i *Indexer) fetchDuckByType(mediaType string) (string, bool, error) {
-	endpoint := fmt.Sprintf("https://random-d.uk/api/v2/random?type=%s", mediaType)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(endpoint)
-	if err != nil {
-		return "", false, fmt.Errorf("failed to fetch duck media: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", false, fmt.Errorf("duck API returned status %d", resp.StatusCode)
-	}
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", false, fmt.Errorf("failed to decode duck response: %w", err)
-	}
-	mediaURL, ok := result["url"].(string)
-	if !ok || mediaURL == "" {
-		return "", false, fmt.Errorf("no URL in duck API response")
-	}
-	isGif := strings.HasSuffix(strings.ToLower(mediaURL), ".gif")
-	return mediaURL, isGif, nil
+	return fetchDuckURL(fmt.Sprintf("https://random-d.uk/api/v2/random?type=%s", mediaType))
 }
 
 // Download image from URL to bytes
@@ -1443,6 +1439,75 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	}
 }
 
+// queryStakeForLeaderlog retrieves pool and total stake for the given target epoch.
+// Tries NtC first with the appropriate mark/set/go snapshot, then falls back to Koios.
+// This is the single authoritative stake-fetch path for all leaderlog calculations.
+// NtC timeout is intentionally short (30s) because NtC is known to time out in some
+// deployments; Koios fallback covers the gap without stalling the leaderlog trigger.
+func (i *Indexer) queryStakeForLeaderlog(ctx context.Context, targetEpoch int) (poolStake, totalStake uint64, err error) {
+	curEpoch := i.getCurrentEpoch()
+
+	// Try NtC if within mark/set/go snapshot range
+	if i.nodeQuery != nil {
+		var snap SnapshotType
+		ntcAvailable := true
+		switch targetEpoch {
+		case curEpoch + 1:
+			snap = SnapshotMark
+		case curEpoch:
+			snap = SnapshotSet
+		case curEpoch - 1:
+			snap = SnapshotGo
+		default:
+			ntcAvailable = false
+		}
+		if ntcAvailable {
+			ntcCtx, ntcCancel := context.WithTimeout(ctx, 30*time.Second)
+			snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
+			ntcCancel()
+			if snapErr != nil {
+				log.Printf("NtC stake query for epoch %d failed: %v", targetEpoch, snapErr)
+			} else {
+				switch snap {
+				case SnapshotMark:
+					poolStake, totalStake = snapshots.PoolStakeMark, snapshots.TotalStakeMark
+				case SnapshotSet:
+					poolStake, totalStake = snapshots.PoolStakeSet, snapshots.TotalStakeSet
+				case SnapshotGo:
+					poolStake, totalStake = snapshots.PoolStakeGo, snapshots.TotalStakeGo
+				}
+				if poolStake > 0 {
+					return poolStake, totalStake, nil
+				}
+			}
+		}
+	}
+
+	// Koios fallback: try target epoch first, then recent epochs
+	if i.koios != nil {
+		for _, tryEpoch := range []int{targetEpoch, curEpoch, curEpoch - 1, curEpoch - 2} {
+			epochNo := koios.EpochNo(tryEpoch)
+			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+			if histErr != nil || len(poolHist.Data) == 0 {
+				continue
+			}
+			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
+			if infoErr != nil || len(epochInfo.Data) == 0 {
+				poolStake = 0
+				continue
+			}
+			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
+			if tryEpoch != targetEpoch {
+				log.Printf("Using Koios stake fallback for epoch %d (from epoch %d)", targetEpoch, tryEpoch)
+			}
+			return poolStake, totalStake, nil
+		}
+	}
+
+	return 0, 0, fmt.Errorf("no stake data available for epoch %d from NtC or Koios", targetEpoch)
+}
+
 // calculateAndPostLeaderlog calculates the leader schedule and posts to Telegram.
 // Returns true on success, false on failure (used for cooldown tracking).
 func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
@@ -1462,46 +1527,10 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 		return false
 	}
 
-	// Get pool + network stake (NtC mark snapshot first, 5min timeout, Koios fallback)
-	var poolStake, totalStake uint64
-	if i.nodeQuery != nil {
-		ntcCtx, ntcCancel := context.WithTimeout(ctx, 5*time.Minute)
-		snapshots, snapErr := i.nodeQuery.QueryPoolStakeSnapshots(ntcCtx, i.bech32PoolId)
-		ntcCancel()
-		if snapErr != nil {
-			log.Printf("NtC stake query failed for auto-leaderlog, trying Koios: %v", snapErr)
-		} else {
-			poolStake = snapshots.PoolStakeMark
-			totalStake = snapshots.TotalStakeMark
-		}
-	}
-	if poolStake == 0 && i.koios != nil {
-		// Koios fallback: try recent completed epochs (Koios may lag 1-2 epochs behind)
-		for _, tryEpoch := range []int{epoch - 1, epoch - 2, epoch - 3} {
-			epochNo := koios.EpochNo(tryEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr != nil {
-				log.Printf("Koios GetPoolHistory(%d) error: %v", tryEpoch, histErr)
-				continue
-			}
-			if len(poolHist.Data) == 0 {
-				log.Printf("Koios GetPoolHistory(%d) returned empty data", tryEpoch)
-				continue
-			}
-			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
-			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr != nil || len(epochInfo.Data) == 0 {
-				log.Printf("Koios GetEpochInfo(%d) failed: %v", tryEpoch, infoErr)
-				poolStake = 0
-				continue
-			}
-			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-			log.Printf("Using Koios stake fallback for epoch %d leaderlog (from epoch %d)", epoch, tryEpoch)
-			break
-		}
-	}
-	if poolStake == 0 || totalStake == 0 {
-		log.Printf("No stake data available for epoch %d (pool=%d, total=%d)", epoch, poolStake, totalStake)
+	// Get pool + network stake via the shared helper (NtC mark snapshot first, Koios fallback)
+	poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, epoch)
+	if stakeErr != nil {
+		log.Printf("No stake data available for epoch %d: %v", epoch, stakeErr)
 		return false
 	}
 
@@ -1695,7 +1724,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 		babbageStart = PreprodBabbageStartEpoch
 	}
 
-	regEpoch, err := fetchPoolRegistrationEpoch(ctx, i.bech32PoolId)
+	regEpoch, err := fetchPoolRegistrationEpoch(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId)
 	if err != nil {
 		return fmt.Errorf("fetching pool registration epoch: %w", err)
 	}
@@ -1747,7 +1776,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 				time.Sleep(time.Second)
 			}
 
-			poolStake, psErr := fetchPoolStakeFromKoios(ctx, i.bech32PoolId, epoch)
+			poolStake, psErr := fetchPoolStakeFromKoios(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId, epoch)
 			if psErr != nil {
 				log.Printf("[history] epoch %d: pool stake failed: %v", epoch, psErr)
 				failed++
@@ -1755,7 +1784,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 			}
 			time.Sleep(time.Second)
 
-			totalStake, tsErr := fetchTotalStakeFromKoios(ctx, epoch)
+			totalStake, tsErr := fetchTotalStakeFromKoios(ctx, koiosRESTBase(i.networkMagic), epoch)
 			if tsErr != nil {
 				log.Printf("[history] epoch %d: total stake failed: %v", epoch, tsErr)
 				failed++
@@ -1789,7 +1818,7 @@ func (i *Indexer) buildLeaderlogHistory(ctx context.Context) error {
 
 		// Get OUR pool's forged slots from Koios (local blocks table has all
 		// pools' blocks, so it can't distinguish our forges from others')
-		forgedSet, fErr := fetchPoolForgedSlots(ctx, i.bech32PoolId, epoch)
+		forgedSet, fErr := fetchPoolForgedSlots(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId, epoch)
 		if fErr != nil {
 			log.Printf("[history] epoch %d: pool forged slots failed: %v", epoch, fErr)
 			forgedSet = make(map[uint64]bool)
@@ -1903,8 +1932,8 @@ func koiosGetWithRetry(ctx context.Context, url string) ([]byte, error) {
 }
 
 // fetchPoolRegistrationEpoch queries Koios for the earliest pool registration epoch.
-func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
+func fetchPoolRegistrationEpoch(ctx context.Context, baseURL, bech32PoolId string) (int, error) {
+	url := fmt.Sprintf(baseURL+"/pool_updates?_pool_bech32=%s&order=active_epoch_no.asc&limit=1", bech32PoolId)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1924,8 +1953,8 @@ func fetchPoolRegistrationEpoch(ctx context.Context, bech32PoolId string) (int, 
 }
 
 // fetchPoolStakeFromKoios returns the pool's active stake for the given epoch via Koios REST API.
-func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int) (uint64, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
+func fetchPoolStakeFromKoios(ctx context.Context, baseURL, bech32PoolId string, epoch int) (uint64, error) {
+	url := fmt.Sprintf(baseURL+"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=active_stake", bech32PoolId, epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1947,8 +1976,8 @@ func fetchPoolStakeFromKoios(ctx context.Context, bech32PoolId string, epoch int
 }
 
 // fetchTotalStakeFromKoios returns the total network active stake for the given epoch via Koios REST API.
-func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
+func fetchTotalStakeFromKoios(ctx context.Context, baseURL string, epoch int) (uint64, error) {
+	url := fmt.Sprintf(baseURL+"/epoch_info?_epoch_no=%d&select=active_stake", epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return 0, err
@@ -1970,8 +1999,8 @@ func fetchTotalStakeFromKoios(ctx context.Context, epoch int) (uint64, error) {
 }
 
 // fetchPoolForgedSlots returns the set of absolute slots where the pool forged a block in the given epoch.
-func fetchPoolForgedSlots(ctx context.Context, bech32PoolId string, epoch int) (map[uint64]bool, error) {
-	url := fmt.Sprintf(""+koiosRestBase+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
+func fetchPoolForgedSlots(ctx context.Context, baseURL, bech32PoolId string, epoch int) (map[uint64]bool, error) {
+	url := fmt.Sprintf(baseURL+"/pool_blocks?_pool_bech32=%s&_epoch_no=%d&select=abs_slot", bech32PoolId, epoch)
 	body, err := koiosGetWithRetry(ctx, url)
 	if err != nil {
 		return nil, err
