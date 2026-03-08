@@ -910,6 +910,14 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		i.checkLeaderlogTrigger(blockEvent.Context.SlotNumber)
 	}
 
+	// DEBUG: Log IssuerVkey for every 10th block to see format
+	if blockEvent.Context.SlotNumber%10 == 0 {
+		log.Printf("[DEBUG] slot %d | IssuerVkey=%s | poolId=%s | match=%v",
+			blockEvent.Context.SlotNumber,
+			blockEvent.Payload.IssuerVkey,
+			i.poolId,
+			blockEvent.Payload.IssuerVkey == i.poolId)
+	}
 	// If the block event is from the pool, process it
 	if blockEvent.Payload.IssuerVkey == i.poolId {
 		i.epochBlocks++
