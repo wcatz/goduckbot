@@ -24,10 +24,6 @@ kubectl -n postgres exec k3s-postgres-1 -- psql -U postgres -d goduckbot_v2 -c \
 curl -s "https://api.koios.rest/api/v1/epoch_params?_epoch_no=530" | jq '.[0].nonce'
 ```
 
-Or via tosidrop (higher rate limits for bulk):
-```bash
-curl -s "https://koios.tosidrop.me/api/v1/epoch_params?_epoch_no=530" | jq '.[0].nonce'
-```
 
 ## 3. Batch verification script
 
@@ -84,7 +80,7 @@ See `nonce-debug` skill for deeper investigation.
 
 ## 6. Known caveats
 
-- **Koios rate limits:** api.koios.rest limits to ~100 req/min. Use tosidrop endpoint for bulk or add `sleep 1` between calls.
+- **Koios rate limits:** api.koios.rest limits to ~100 req/min. Add `sleep 1` between calls for bulk verification.
 - **Rolling accumulation:** Nonce evolution is cumulative. A single wrong VRF output corrupts ALL subsequent epoch nonces. If you find a mismatch, check the earliest mismatched epoch first.
 - **Source column:** `tickn` = computed locally via TICKN rule, `koios` = fetched from Koios as fallback. TICKN-sourced nonces that match Koios confirm the entire local chain is correct.
 - **Lite mode:** Only has Koios-sourced nonces. Verification is trivial (always matches). Full mode is where TICKN verification matters.

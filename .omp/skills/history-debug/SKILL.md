@@ -163,7 +163,7 @@ go func() {
 
 ```bash
 # Direct Koios query for pool-specific forged slots
-curl -s "https://koios.tosidrop.me/api/v1/pool_blocks?_pool_bech32=pool1eq33dptvch4lstwuwkzt6atuutp3urh7pry7laudal54y2lsw0x&_epoch_no=612" | \
+curl -s "https://api.koios.rest/api/v1/pool_blocks?_pool_bech32=pool1eq33dptvch4lstwuwkzt6atuutp3urh7pry7laudal54y2lsw0x&_epoch_no=612" | \
   jq -r '.[] | .abs_slot'
 
 # Returns array of slots where pool forged blocks
@@ -221,8 +221,8 @@ kubectl -n cardano rollout restart deployment/goduckbot
 ### Koios API Errors
 
 ```bash
-# Check tosidrop Koios status
-curl -s https://koios.tosidrop.me/api/v1/tip | jq
+# Check Koios status
+curl -s https://api.koios.rest/api/v1/tip | jq
 
 # Switch to official Koios (change koiosRestBase in code)
 # Or add retry logic with longer backoff

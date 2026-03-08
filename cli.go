@@ -123,15 +123,8 @@ func cliInit() (*cliContext, func(), error) {
 	}
 	cc.store = store
 
-	// Koios client
-	switch cc.networkMagic {
-	case PreprodNetworkMagic:
-		cc.koios, err = koios.New(koios.Host(koios.PreProdHost), koios.APIVersion("v1"))
-	case PreviewNetworkMagic:
-		cc.koios, err = koios.New(koios.Host(koios.PreviewHost), koios.APIVersion("v1"))
-	default:
-		cc.koios, err = koios.New(koios.Host(koios.MainnetHost), koios.APIVersion("v1"))
-	}
+	// Koios client; host defaults to public koios.rest, overridable via koios.url config
+	cc.koios, err = koios.New(koios.Host(koiosClientHost(cc.networkMagic)), koios.APIVersion("v1"))
 	if err != nil {
 		store.Close()
 		if cc.vrfKey != nil {
