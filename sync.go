@@ -17,7 +17,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -83,22 +82,20 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	chainSyncCfg := chainsync.NewConfig(
 		chainsync.WithRollForwardFunc(s.handleRollForward),
 		chainsync.WithRollBackwardFunc(s.handleRollBackward),
-		chainsync.WithPipelineLimit(1000),
+		chainsync.WithPipelineLimit(100),
 	)
 
 	// Connect to node via NtN (required for TCP connections)
-	// Keepalive settings: 15s period keeps connection active, 120s timeout
-	// allows for slow responses during heavy sync load.
-	keepAliveCfg := keepalive.NewConfig(
-		keepalive.WithPeriod(15*time.Second),
-		keepalive.WithTimeout(120*time.Second),
-	)
+	// Keepalive DISABLED during historical sync: enabling keepalive causes
+	// ChainSync to stall after ~2000 blocks (gouroboros muxer interaction),
+	// dropping throughput from ~2500 blk/s to ~6 blk/s.
+	// Without keepalive the node kills us every ~97s (ExceededTimeLimit),
+	// but the retry loop handles reconnects seamlessly at ~1800 blk/s sustained.
 	errChan := make(chan error, 1)
 	conn, connErr := ouroboros.NewConnection(
 		ouroboros.WithNetworkMagic(uint32(s.networkMagic)),
 		ouroboros.WithNodeToNode(true),
-		ouroboros.WithKeepAlive(true),
-		ouroboros.WithKeepAliveConfig(keepAliveCfg),
+		ouroboros.WithKeepAlive(false),
 		ouroboros.WithChainSyncConfig(chainSyncCfg),
 		ouroboros.WithErrorChan(errChan),
 	)
