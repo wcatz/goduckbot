@@ -9,6 +9,11 @@ on:
   pull_request:
     branches:
       - master
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (e.g. 3.1.0-rc1)'
+        required: true
 
 jobs:
   build-and-push:
@@ -28,11 +33,12 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
 
       - name: Extract tag for Docker image
         id: meta
         uses: docker/metadata-action@v5
+        if: github.event_name != 'workflow_dispatch'
         with:
           images: wcatz/goduckbot
           flavor: |
@@ -49,10 +55,10 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ github.event_name == 'workflow_dispatch' && format('wcatz/goduckbot:{0}', inputs.tag) || steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
             COMMIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.pull_request.updated_at || github.event.repository.updated_at }}
