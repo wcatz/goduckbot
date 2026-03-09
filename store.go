@@ -33,7 +33,7 @@ type BlockVrfRows interface {
 // Both SQLite and PostgreSQL backends implement this interface.
 type Store interface {
 	InsertBlock(ctx context.Context, slot uint64, epoch int, blockHash string, vrfOutput, nonceValue []byte) (bool, error)
-	InsertBlockBatch(ctx context.Context, blocks []BlockData) error
+	InsertBlockBatch(ctx context.Context, blocks []BlockData) (int, error)
 	UpsertEvolvingNonce(ctx context.Context, epoch int, nonce []byte, blockCount int) error
 	SetCandidateNonce(ctx context.Context, epoch int, nonce []byte) error
 	SetFinalNonce(ctx context.Context, epoch int, nonce []byte, source string) error
@@ -344,10 +344,10 @@ func (s *SqliteStore) GetForgedSlots(ctx context.Context, epoch int) ([]uint64, 
 	return slots, rows.Err()
 }
 
-func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
+func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -357,18 +357,23 @@ func (s *SqliteStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) 
 		 ON CONFLICT (slot) DO NOTHING`,
 	)
 	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
+		return 0, fmt.Errorf("prepare: %w", err)
 	}
 	defer stmt.Close()
 
+	inserted := 0
 	for _, b := range blocks {
 		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, b.NetworkMagic)
-		if _, err := stmt.ExecContext(ctx, int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue); err != nil {
-			return fmt.Errorf("insert slot %d: %w", b.Slot, err)
+		result, err := stmt.ExecContext(ctx, int64(b.Slot), b.Epoch, b.BlockHash, b.VrfOutput, nonceValue)
+		if err != nil {
+			return 0, fmt.Errorf("insert slot %d: %w", b.Slot, err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			inserted++
 		}
 	}
 
-	return tx.Commit()
+	return inserted, tx.Commit()
 }
 
 

@@ -675,7 +675,7 @@ func TestStoreBlockBatch(t *testing.T) {
 		{Slot: 300, Epoch: 1, BlockHash: "h3", VrfOutput: make([]byte, 64), NetworkMagic: MainnetNetworkMagic},
 	}
 
-	if err := store.InsertBlockBatch(ctx, blocks); err != nil {
+	if _, err := store.InsertBlockBatch(ctx, blocks); err != nil {
 		t.Fatalf("InsertBlockBatch: %v", err)
 	}
 
@@ -696,7 +696,7 @@ func TestStoreBlockBatch(t *testing.T) {
 	}
 
 	// Duplicate batch should not error (ON CONFLICT DO NOTHING)
-	if err := store.InsertBlockBatch(ctx, blocks); err != nil {
+	if _, err := store.InsertBlockBatch(ctx, blocks); err != nil {
 		t.Fatalf("InsertBlockBatch duplicate: %v", err)
 	}
 

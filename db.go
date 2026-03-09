@@ -269,10 +269,10 @@ func (s *PgStore) GetForgedSlots(ctx context.Context, epoch int) ([]uint64, erro
 	return slots, rows.Err()
 }
 
-func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) error {
+func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -281,7 +281,7 @@ func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) erro
 		slot BIGINT, epoch INT, block_hash TEXT, vrf_output BYTEA, nonce_value BYTEA
 	) ON COMMIT DROP`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	rows := make([][]interface{}, len(blocks))
@@ -297,18 +297,19 @@ func (s *PgStore) InsertBlockBatch(ctx context.Context, blocks []BlockData) erro
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	// Merge into blocks — duplicates silently skipped
-	_, err = tx.Exec(ctx, `INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
+	// Merge into blocks — duplicates silently skipped, count actually inserted
+	result, err := tx.Exec(ctx, `INSERT INTO blocks (slot, epoch, block_hash, vrf_output, nonce_value)
 		SELECT slot, epoch, block_hash, vrf_output, nonce_value FROM blocks_staging
 		ON CONFLICT (slot) DO NOTHING`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	return tx.Commit(ctx)
+	inserted := int(result.RowsAffected())
+	return inserted, tx.Commit(ctx)
 }
 
 

@@ -138,20 +138,27 @@ func (s *ChainSyncer) Stop() {
 }
 
 // getIntersectPoints determines where to start syncing from.
+// Uses an overlap window of 100 blocks (~2000 slots) on reconnect to prevent
+// gaps from blocks lost in the gouroboros muxer buffer when a connection dies.
+// ON CONFLICT DO NOTHING in InsertBlockBatch handles the resulting duplicates.
 func (s *ChainSyncer) getIntersectPoints(ctx context.Context) ([]pcommon.Point, error) {
 	if s.store == nil {
 		return []pcommon.Point{pcommon.NewPointOrigin()}, nil
 	}
 
-	// Check if we have existing data to resume from
-	lastSlot, err := s.store.GetLastSyncedSlot(ctx)
-	if err == nil && lastSlot > 0 {
-		log.Printf("Resuming sync from last synced slot %d", lastSlot)
-		point, err := s.getIntersectForSlot(ctx, lastSlot)
-		if err == nil {
-			return []pcommon.Point{point}, nil
+	// Resume with overlap: fetch last 100 blocks and intersect at the oldest.
+	// This backs up ~2000 slots so any blocks lost in the muxer's buffer
+	// during a connection timeout get re-delivered by the node.
+	blocks, err := s.store.GetLastNBlocks(ctx, 100)
+	if err == nil && len(blocks) > 0 {
+		oldest := blocks[len(blocks)-1] // GetLastNBlocks returns DESC order
+		log.Printf("Resuming sync from slot %d (overlap: %d blocks back from tip slot %d)",
+			oldest.Slot, len(blocks), blocks[0].Slot)
+		hashBytes, decErr := hex.DecodeString(oldest.BlockHash)
+		if decErr == nil {
+			return []pcommon.Point{pcommon.NewPoint(oldest.Slot, hashBytes)}, nil
 		}
-		log.Printf("Could not get intersect for slot %d, falling back to Shelley genesis: %v", lastSlot, err)
+		log.Printf("Could not decode block hash at slot %d: %v", oldest.Slot, decErr)
 	}
 
 	// Start from Shelley genesis (skip Byron)
