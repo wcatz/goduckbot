@@ -103,7 +103,7 @@ Port 3001 is NtN (chain sync). Port 30000 (socat) is NtC (local state queries). 
 
 Per slot in target epoch:
 
-```
+```text
 1. vrfInput    = BLAKE2b-256(slot[8B BE] || epochNonce[32B])
 2. _, output   = vrf.Prove(vrfSkey[:32], vrfInput)
 3. leaderValue = BLAKE2b-256(0x4C || output)
@@ -128,7 +128,7 @@ At the stability window: freeze candidate nonce `η_c` from the current `η_v`.
 
 Epoch transition — TICKN rule for epoch E's nonce:
 
-```
+```text
 epochNonce(E) = BLAKE2b-256(η_c(E-1) || η_ph(E-2))
 ```
 
@@ -151,7 +151,7 @@ The next epoch's nonce becomes deterministic after the stability window. duckBot
 
 ### Historical Sync Pipeline
 
-```
+```text
 sync.go (NtN ChainSync) → blockCh [10,000 buf] → batch writer → InsertBlockBatch (CopyFrom) → ProcessBatch (nonce)
 ```
 
