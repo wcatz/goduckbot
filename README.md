@@ -2,6 +2,8 @@
 
 <img src="logo.jpg" alt="duckBot" width="130" align="right">
 
+We call it duckBot. There is no better name, and the day is coming soon when it will be unleashed.
+
 Cardano stake pool notification bot. Single Go binary, no CGO, talks directly to cardano-node via [gouroboros](https://github.com/blinklabs-io/gouroboros).
 
 Block notifications (Telegram, Twitter/X), CPraos leader schedule calculation, epoch nonce evolution, stake queries, and leaderlog history.
