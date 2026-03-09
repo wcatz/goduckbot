@@ -520,7 +520,7 @@ func (i *Indexer) flushBlockBatch(batch []BlockData) {
 
 	// Large batches (historical sync) — bulk insert via CopyFrom
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err := i.store.InsertBlockBatch(ctx, batch)
+	inserted, err := i.store.InsertBlockBatch(ctx, batch)
 	cancel()
 
 	if err != nil {
@@ -532,7 +532,17 @@ func (i *Indexer) flushBlockBatch(batch []BlockData) {
 		return
 	}
 
-	// Blocks inserted via CopyFrom, evolve nonce in-memory with single DB persist
+	if inserted < len(batch) {
+		// Overlap window: some blocks already existed (reconnect overlap).
+		// Blocks arrive in slot order, so duplicates are at the start.
+		// Slice to only the new blocks for nonce evolution.
+		dupes := len(batch) - inserted
+		log.Printf("Batch had %d/%d duplicates (overlap), evolving %d new blocks", dupes, len(batch), inserted)
+		i.nonceTracker.ProcessBatch(batch[dupes:])
+		return
+	}
+
+	// All blocks were new — evolve nonce in-memory with single DB persist
 	i.nonceTracker.ProcessBatch(batch)
 }
 
