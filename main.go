@@ -23,18 +23,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/blinklabs-io/adder/event"
-	filter_event "github.com/blinklabs-io/adder/filter/event"
-	"github.com/blinklabs-io/adder/input/chainsync"
-	output_embedded "github.com/blinklabs-io/adder/output/embedded"
-	"github.com/blinklabs-io/adder/pipeline"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/allegra"
-	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
+	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	koios "github.com/cardano-community/koios-go-client/v3"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gorilla/websocket"
@@ -110,16 +103,13 @@ var upgrader = websocket.Upgrader{
 // Singleton instance of the Indexer
 var globalIndexer = &Indexer{}
 
-// Block interval tracking for adder live tail
+// Block interval tracking for live tail
 var prevBlockTimestamp time.Time
 var timeDiffString string
 
-// Tracks goroutines leaked when pipeline.Stop() times out
-var abandonedPipelines int64 // atomic
-
-// Indexer struct to manage the adder pipeline and block events
+// Indexer manages the chain sync pipeline, block notifications, and leaderlog.
 type Indexer struct {
-	pipeline        *pipeline.Pipeline
+	liveTailConn    *ouroboros.Connection
 	bot             *telebot.Bot
 	poolId          string
 	telegramChannel string
@@ -135,7 +125,7 @@ type Indexer struct {
 	epoch           int
 	networkMagic    int
 	wg              sync.WaitGroup
-	// Mode: "lite" (adder tail + Koios) or "full" (historical sync + adder tail)
+	// Mode: "lite" (live tail + Koios) or "full" (historical sync + live tail)
 	mode string
 	// Duck media settings
 	duckMedia     string // "gif", "image", or "both" (default)
@@ -175,11 +165,15 @@ func (i *Indexer) isSynced() bool {
 	return atomic.LoadInt32(&i.historicalSyncDone) == 1
 }
 
+// BlockEvent is the JSON structure broadcast to WebSocket clients.
 type BlockEvent struct {
-	Type      string             `json:"type"`
-	Timestamp string             `json:"timestamp"`
-	Context   event.BlockContext `json:"context"`
-	Payload   event.BlockEvent   `json:"payload"`
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	SlotNumber   uint64 `json:"slotNumber"`
+	BlockNumber  uint64 `json:"blockNumber"`
+	BlockHash    string `json:"blockHash"`
+	IssuerVkey   string `json:"issuerVkey"`
+	BlockBodySize uint64 `json:"blockBodySize"`
 }
 
 // calcCurrentEpoch calculates the current epoch for a network using wall clock time.
@@ -546,9 +540,9 @@ func (i *Indexer) flushBlockBatch(batch []BlockData) {
 	i.nonceTracker.ProcessBatch(batch)
 }
 
-// runChainTail runs historical sync (full mode) then starts adder pipeline for live tail.
-// Full mode: gouroboros historical sync → caught up → adder pipeline (live tail)
-// Lite mode: adder pipeline only (intersect at tip)
+// runChainTail runs historical sync (full mode) then starts live tail.
+// Full mode: gouroboros historical sync → caught up → NtN live tail
+// Lite mode: NtN live tail only (intersect at tip)
 func (i *Indexer) runChainTail() error {
 	fullMode := i.mode == "full" && i.leaderlogEnabled
 	if i.mode == "full" && !i.leaderlogEnabled {
@@ -582,7 +576,7 @@ func (i *Indexer) runChainTail() error {
 
 		onCaughtUp := func() {
 			log.Println("Historical sync caught up, stopping ChainSyncer...")
-			syncCancel() // stop ChainSyncer so Start() returns and adder takes over
+			syncCancel() // stop ChainSyncer so Start() returns and live tail takes over
 		}
 
 		// DB writer goroutine — drains channel in batches for throughput
@@ -705,16 +699,16 @@ func (i *Indexer) runChainTail() error {
 		}()
 	}
 
-	// Start adder pipeline for live chain tail (both full and lite mode)
-	return i.startAdderPipeline()
+	// Start live tail for chain tip (both full and lite mode)
+	return i.startLiveTail()
 }
 
-// startAdderPipeline starts the adder pipeline for live chain tail.
-// It runs an infinite restart loop: on pipeline error or stall, it stops, waits, and reconnects.
-// Auto-reconnect is disabled because adder orphans the event channel after reconnect.
+// startLiveTail starts the live chain tail using raw gouroboros NtN ChainSync.
+// It runs an infinite restart loop with host failover: on connection error or stall,
+// it closes the connection, waits, and reconnects from the tip.
 // A stall detector goroutine monitors lastBlockTime and forces a restart if no blocks
-// arrive for 2 minutes (catches zombie state where pipeline.Stop() previously hung).
-func (i *Indexer) startAdderPipeline() error {
+// arrive for 2 minutes.
+func (i *Indexer) startLiveTail() error {
 	hosts := i.nodeAddresses
 
 	for {
@@ -723,48 +717,57 @@ func (i *Indexer) startAdderPipeline() error {
 			bo := backoff.NewExponentialBackOff()
 			bo.MaxElapsedTime = maxRetryDuration
 
-			startPipelineFunc := func() error {
-				node := chainsync.WithAddress(host)
-				inputOpts := []chainsync.ChainSyncOptionFunc{
-					node,
-					chainsync.WithNetworkMagic(uint32(i.networkMagic)),
-					chainsync.WithIntersectTip(true),
-					chainsync.WithAutoReconnect(false),
-					chainsync.WithIncludeCbor(false),
-				}
+			errChan := make(chan error, 1)
+			connectFunc := func() error {
+				chainSyncCfg := chainsync.NewConfig(
+					chainsync.WithRollForwardFunc(i.handleRollForward),
+					chainsync.WithRollBackwardFunc(i.handleRollBackward),
+				)
 
-				i.pipeline = pipeline.New()
-				input_chainsync := chainsync.New(inputOpts...)
-				i.pipeline.AddInput(input_chainsync)
-
-				filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block"}))
-				i.pipeline.AddFilter(filterEvent)
-
-				output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
-				i.pipeline.AddOutput(output)
-
-				err := i.pipeline.Start()
+				conn, err := ouroboros.NewConnection(
+					ouroboros.WithNetworkMagic(uint32(i.networkMagic)),
+					ouroboros.WithNodeToNode(true),
+					ouroboros.WithKeepAlive(true),
+					ouroboros.WithChainSyncConfig(chainSyncCfg),
+					ouroboros.WithBlockFetchConfig(blockfetch.NewConfig()),
+					ouroboros.WithErrorChan(errChan),
+				)
 				if err != nil {
-					log.Printf("Failed to start pipeline on %s: %s. Retrying...", host, err)
-					return err
+					return fmt.Errorf("creating connection: %w", err)
 				}
 
+				if err := conn.Dial("tcp", host); err != nil {
+					conn.Close()
+					return fmt.Errorf("connecting to %s: %w", host, err)
+				}
+
+				// Sync from tip
+				tip, err := conn.ChainSync().Client.GetCurrentTip()
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("getting tip: %w", err)
+				}
+
+				if err := conn.ChainSync().Client.Sync([]pcommon.Point{tip.Point}); err != nil {
+					conn.Close()
+					return fmt.Errorf("starting chain sync: %w", err)
+				}
+
+				i.liveTailConn = conn
 				return nil
 			}
 
-			err := backoff.Retry(startPipelineFunc, bo)
+			err := backoff.Retry(connectFunc, bo)
 			if err != nil {
 				log.Printf("Failed to connect to node at %s after retries: %s", host, err)
 				continue
 			}
 
-			log.Printf("Pipeline connected to node at %s", host)
+			log.Printf("Live tail connected to node at %s (NtN ChainSync)", host)
 			connected = true
 			atomic.StoreInt64(&i.lastBlockTime, time.Now().Unix())
 
 			// Start stall detector — forces restart if no blocks for 2 minutes.
-			// This catches the zombie state where pipeline.Stop() hangs or the
-			// pipeline silently stops delivering blocks after a reconnect.
 			stallCh := make(chan struct{})
 			stallDone := make(chan struct{})
 			go func() {
@@ -778,7 +781,7 @@ func (i *Indexer) startAdderPipeline() error {
 						if lastSeen > 0 {
 							stale := time.Since(time.Unix(lastSeen, 0))
 							if stale > 2*time.Minute {
-								log.Printf("Pipeline stall detected (no blocks for %s), forcing restart",
+								log.Printf("Live tail stall detected (no blocks for %s), forcing restart",
 									stale.Round(time.Second))
 								close(stallCh)
 								return
@@ -790,39 +793,26 @@ func (i *Indexer) startAdderPipeline() error {
 				}
 			}()
 
-			// Block until pipeline error OR stall detected
+			// Block until connection error OR stall detected
 			select {
-			case pipelineErr := <-i.pipeline.ErrorChan():
-				log.Printf("Pipeline error: %s", pipelineErr)
+			case connErr := <-errChan:
+				log.Printf("Live tail error: %s", connErr)
 			case <-stallCh:
 				// Stall detector already logged
 			}
 
-			// Signal stall detector to stop (no-op if it already closed stallCh)
+			// Signal stall detector to stop
 			select {
 			case <-stallCh:
-				// Already closed
 			default:
 				close(stallCh)
 			}
 			<-stallDone
 
-			// Stop the dead pipeline with timeout to prevent hanging forever.
-			// pipeline.Stop() can block indefinitely if the underlying connection
-			// is in a broken state (the root cause of the zombie bug).
-			stopDone := make(chan struct{})
-			go func() {
-				if stopErr := i.pipeline.Stop(); stopErr != nil {
-					log.Printf("Pipeline stop error: %s", stopErr)
-				}
-				close(stopDone)
-			}()
-			select {
-			case <-stopDone:
-				// Clean shutdown
-			case <-time.After(5 * time.Second):
-				n := atomic.AddInt64(&abandonedPipelines, 1)
-				log.Printf("Pipeline stop timed out, abandoning old pipeline (leaked: %d)", n)
+			// Close the connection
+			if i.liveTailConn != nil {
+				i.liveTailConn.Close()
+				i.liveTailConn = nil
 			}
 
 			break // break inner host loop, restart from outer loop
@@ -832,52 +822,46 @@ func (i *Indexer) startAdderPipeline() error {
 			log.Println("Failed to connect to any host, retrying all in 30s...")
 			time.Sleep(30 * time.Second)
 		} else {
-			log.Println("Pipeline died, restarting in 5s...")
+			log.Println("Live tail died, restarting in 5s...")
 			time.Sleep(5 * time.Second)
 		}
 	}
 }
 
-// handleEvent processes a block event from the adder pipeline (live tail).
-func (i *Indexer) handleEvent(evt event.Event) error {
-	// Update liveness tracker for stall detection
+// handleRollForward processes a block header from the NtN live tail.
+func (i *Indexer) handleRollForward(ctx chainsync.CallbackContext, blockType uint, data any, tip chainsync.Tip) error {
 	atomic.StoreInt64(&i.lastBlockTime, time.Now().Unix())
 
-	// Extract VRF output before JSON marshal (Block field is json:"-")
+	// Skip Byron blocks
+	if blockType == ledger.BlockTypeByronEbb || blockType == ledger.BlockTypeByronMain {
+		return nil
+	}
+
+	header, ok := data.(ledger.BlockHeader)
+	if !ok {
+		return fmt.Errorf("expected BlockHeader, got %T", data)
+	}
+
+	slot := header.SlotNumber()
+	blockHash := header.Hash().String()
+	blockNumber := header.BlockNumber()
+	issuerVkeyBytes := header.IssuerVkey()
+	issuerVkey := hex.EncodeToString(issuerVkeyBytes[:])
+	bodySize := header.BlockBodySize()
+
+	// Extract VRF output (reuses extractVrfFromHeader in sync.go)
 	var vrfOutput []byte
 	if i.leaderlogEnabled {
-		if be, ok := evt.Payload.(event.BlockEvent); ok && be.Block != nil {
-			vrfOutput = extractVrfOutput(be.Block.Header())
-		}
+		vrfOutput = extractVrfFromHeader(blockType, header)
 	}
 
-	// Marshal the event to JSON
-	data, err := json.Marshal(evt)
-	if err != nil {
-		log.Printf("error marshalling event, skipping: %v", err)
-		return nil
-	}
-
-	// Unmarshal the event to get the block event details
-	var blockEvent BlockEvent
-	err = json.Unmarshal(data, &blockEvent)
-	if err != nil {
-		log.Printf("error unmarshalling block event, skipping: %v", err)
-		return nil
-	}
-
-	// Convert the block event timestamp to time.Time
-	blockEventTime, err := time.Parse(time.RFC3339, blockEvent.Timestamp)
-	if err != nil {
-		log.Printf("error parsing block event timestamp, skipping: %v", err)
-		return nil
-	}
-
-	// Calculate the time difference between the current block event and the previous one
+	// Block interval tracking
+	now := time.Now()
+	blockTime := now.Format(time.RFC3339)
 	if prevBlockTimestamp.IsZero() {
 		timeDiffString = "first"
 	} else {
-		timeDiff := blockEventTime.Sub(prevBlockTimestamp)
+		timeDiff := now.Sub(prevBlockTimestamp)
 		if timeDiff.Seconds() < 60 {
 			timeDiffString = fmt.Sprintf("%.0fs", timeDiff.Seconds())
 		} else {
@@ -886,19 +870,15 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			timeDiffString = fmt.Sprintf("%dm%02ds", minutes, seconds)
 		}
 	}
+	prevBlockTimestamp = now
 
-	// Update the previous block event timestamp with the current one
-	prevBlockTimestamp = blockEventTime
-
-	// Log clean block line: slot, hash, nonce (VRF output)
+	// Log block
 	vrfHex := ""
 	if vrfOutput != nil {
 		vrfHex = hex.EncodeToString(vrfOutput)
 	}
 	log.Printf("[block] slot %d | hash %s | nonce %s | interval %s",
-		blockEvent.Context.SlotNumber,
-		blockEvent.Payload.BlockHash,
-		vrfHex, timeDiffString)
+		slot, truncHash(blockHash, 16), truncHash(vrfHex, 16), timeDiffString)
 
 	// Customize links based on the network magic number
 	var cexplorerLink string
@@ -911,11 +891,8 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		cexplorerLink = "https://cexplorer.io/block/"
 	}
 
-	// Derive epoch from block slot (not wall clock) for correct nonce tracking.
-	// Wall clock can disagree at epoch boundaries if a late block arrives after
-	// the boundary time, which would misattribute the block's epoch and corrupt
-	// nonce evolution and TICKN η_ph (last block hash per epoch).
-	blockEpoch := SlotToEpoch(blockEvent.Context.SlotNumber, i.networkMagic)
+	// Derive epoch from block slot for correct nonce tracking
+	blockEpoch := SlotToEpoch(slot, i.networkMagic)
 	if blockEpoch != i.epoch {
 		i.epoch = blockEpoch
 		i.epochBlocks = 0
@@ -923,27 +900,31 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 
 	// Track VRF data for nonce evolution
 	if i.leaderlogEnabled && vrfOutput != nil {
-		i.nonceTracker.ProcessBlock(
-			blockEvent.Context.SlotNumber,
-			blockEpoch,
-			blockEvent.Payload.BlockHash,
-			vrfOutput,
-		)
-		i.checkLeaderlogTrigger(blockEvent.Context.SlotNumber)
+		i.nonceTracker.ProcessBlock(slot, blockEpoch, blockHash, vrfOutput)
+		i.checkLeaderlogTrigger(slot)
 	}
 
-	// If the block event is from the pool, process it
-	if blockEvent.Payload.IssuerVkey == i.poolId {
+	// If the block is from our pool, fetch full block for tx count and send notifications
+	if issuerVkey == i.poolId {
 		i.epochBlocks++
 		i.totalBlocks++
 
-		blockSizeKB := float64(blockEvent.Payload.BlockBodySize) / 1024
+		// Fetch full block via BlockFetch to get transaction count
+		var txCount int
+		if i.liveTailConn != nil && i.liveTailConn.BlockFetch() != nil {
+			point := pcommon.NewPoint(slot, header.Hash().Bytes())
+			if block, fetchErr := i.liveTailConn.BlockFetch().Client.GetBlock(point); fetchErr == nil {
+				txCount = len(block.Transactions())
+			} else {
+				log.Printf("BlockFetch failed for slot %d: %v", slot, fetchErr)
+			}
+		}
+
+		blockSizeKB := float64(bodySize) / 1024
 		sizePercentage := (blockSizeKB / fullBlockSize) * 100
 
 		log.Printf("[MINTED] slot %d | hash %s | txs %d | %.1fKB (%.0f%%) | epoch %d | lifetime %d",
-			blockEvent.Context.SlotNumber,
-			truncHash(blockEvent.Payload.BlockHash, 16),
-			blockEvent.Payload.TransactionCount,
+			slot, truncHash(blockHash, 16), txCount,
 			blockSizeKB, sizePercentage,
 			i.epochBlocks, i.totalBlocks)
 
@@ -958,9 +939,9 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				"Lifetime Blocks: %d\n\n"+
 				"Pooltool: https://pooltool.io/realtime/%d\n\n"+
 				"Cexplorer: "+cexplorerLink+"%s",
-			i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
+			i.poolName, txCount, blockSizeKB, sizePercentage,
 			timeDiffString, i.epochBlocks, i.totalBlocks,
-			blockEvent.Context.BlockNumber, blockEvent.Payload.BlockHash)
+			blockNumber, blockHash)
 
 		// Get duck media for notifications
 		mediaURL, isGif, mediaErr := i.getDuckMedia()
@@ -999,7 +980,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 			}
 		}
 
-		// Send tweet if Twitter is enabled (same format as Telegram minus links)
+		// Send tweet if Twitter is enabled
 		if i.twitterEnabled {
 			tweetMsg := fmt.Sprintf(
 				"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
@@ -1010,7 +991,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 					"Interval: %s\n\n"+
 					"Epoch Blocks: %d\n"+
 					"Lifetime Blocks: %d",
-				i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
+				i.poolName, txCount, blockSizeKB, sizePercentage,
 				timeDiffString, i.epochBlocks, i.totalBlocks)
 
 			if err := i.sendTweet(tweetMsg, mediaURL, isGif); err != nil {
@@ -1019,7 +1000,16 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		}
 	}
 
-	// Send the block event to the WebSocket clients (non-blocking)
+	// Broadcast to WebSocket clients
+	blockEvent := BlockEvent{
+		Type:          "chainsync.block",
+		Timestamp:     blockTime,
+		SlotNumber:    slot,
+		BlockNumber:   blockNumber,
+		BlockHash:     blockHash,
+		IssuerVkey:    issuerVkey,
+		BlockBodySize: bodySize,
+	}
 	select {
 	case broadcast <- blockEvent:
 	default:
@@ -1028,26 +1018,12 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	return nil
 }
 
-// extractVrfOutput extracts VRF output from a ledger.BlockHeader (adder live tail).
-func extractVrfOutput(header ledger.BlockHeader) []byte {
-	switch h := header.(type) {
-	case *conway.ConwayBlockHeader:
-		return h.Body.VrfResult.Output
-	case *babbage.BabbageBlockHeader:
-		return h.Body.VrfResult.Output
-	case *alonzo.AlonzoBlockHeader:
-		return h.Body.NonceVrf.Output
-	case *mary.MaryBlockHeader:
-		return h.Body.NonceVrf.Output
-	case *allegra.AllegraBlockHeader:
-		return h.Body.NonceVrf.Output
-	case *shelley.ShelleyBlockHeader:
-		return h.Body.NonceVrf.Output
-	default:
-		log.Printf("Could not extract VRF from header type %T", header)
-		return nil
-	}
+// handleRollBackward handles a rollback during live tail.
+func (i *Indexer) handleRollBackward(ctx chainsync.CallbackContext, point pcommon.Point, tip chainsync.Tip) error {
+	log.Printf("[live] rollback to slot %d", point.Slot)
+	return nil
 }
+
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// Upgrade initial GET request to a websocket
