@@ -4,9 +4,9 @@
 
 We call it duckBot. There is no better name, and the day is coming soon when it will be unleashed.
 
-Cardano stake pool notification bot. Single Go binary, no CGO, talks directly to cardano-node via [gouroboros](https://github.com/blinklabs-io/gouroboros).
+Cardano stake pool notification bot. Single Go binary, no CGO, talks directly to cardano-node via [gOuroboros](https://github.com/blinklabs-io/gouroboros).
 
-Block notifications (Telegram, Twitter/X), CPraos leader schedule calculation, epoch nonce evolution, stake queries, and leaderlog history.
+CPraos leader schedule calculation, epoch nonce evolution, block notifications (Telegram, Twitter/X), stake queries, and full history.
 
 ## Quick Start
 
@@ -58,21 +58,23 @@ docker compose logs -f
 
 ### Full Mode
 
-Adds historical chain sync, self-computed nonces, and NtC stake queries. Requires a VRF key and database.
+Adds full chain sync, self-computed nonces, and local leader schedule calculation. Requires a VRF key and a database (SQLite by default, PostgreSQL optional).
 
 ```yaml
 mode: "full"
 nodeAddress:
   host1: "your-node:3001"
-  ntcHost: "/ipc/node.socket"      # UNIX socket
-  # ntcHost: "your-node:30000"     # or TCP via socat
 
 leaderlog:
   enabled: true
   vrfKeyValue: "5840..."           # cborHex from vrf.skey
   timezone: "America/New_York"
   timeFormat: "12h"
+```
 
+The `vrfKeyValue` is the `cborHex` field from your `vrf.skey` file (`5840` + 128 hex chars = 32-byte private scalar + 32-byte public key). SQLite is used by default with no extra config. For PostgreSQL:
+
+```yaml
 database:
   driver: "postgres"
   host: "postgres-host"
@@ -81,14 +83,7 @@ database:
   user: "goduckbot"
 ```
 
-Set `GODUCKBOT_DB_PASSWORD` in `.env`. The `vrfKeyValue` is the `cborHex` field from your `vrf.skey` file (`5840` + 128 hex chars = 32-byte private scalar + 32-byte public key).
-
-For remote NtC access, bridge the UNIX socket with socat:
-```bash
-socat TCP-LISTEN:30000,fork UNIX-CLIENT:/ipc/node.socket,ignoreeof
-```
-
-Port 3001 is NtN (chain sync). Port 30000 (socat) is NtC (local state queries). Stake queries require NtC.
+Set `GODUCKBOT_DB_PASSWORD` in `.env`.
 
 ## How It Works
 
@@ -138,7 +133,7 @@ Where:
 
 The `η_ph` component lags by one epoch — at the E-1 → E transition, the `labNonce` (last anchor block nonce) from epoch E-2 is used, while the current epoch's `labNonce` is saved for the next transition.
 
-Epoch 259 is hardcoded (the only mainnet epoch with `extra_entropy`).
+Epoch 259's nonce is hardcoded because it is the only mainnet epoch where the `extra_entropy` protocol parameter was set. Since duckBot computes nonces purely from VRF outputs in block headers, it cannot account for `extra_entropy` — so the known result is used directly.
 
 ### Stability Window
 
@@ -177,7 +172,7 @@ sync.go (NtN ChainSync) → blockCh [10,000 buf] → batch writer → InsertBloc
 | **Set** | End of epoch N-2 | Current epoch |
 | **Go** | End of epoch N-3 | Previous epoch |
 
-Queried via NtC `GetStakeSnapshots()`. Falls back to Koios if NtC unavailable.
+Queried via Koios API.
 
 ### DB Integrity Check
 
@@ -222,7 +217,7 @@ Commands with subcommands show inline keyboard buttons when called without argum
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `TELEGRAM_TOKEN` | Yes | Telegram bot API token |
-| `GODUCKBOT_DB_PASSWORD` | Full mode (postgres) | PostgreSQL password |
+| `GODUCKBOT_DB_PASSWORD` | No (postgres only) | PostgreSQL password |
 | `TWITTER_API_KEY` | No | Twitter/X API key |
 | `TWITTER_API_KEY_SECRET` | No | Twitter/X API secret |
 | `TWITTER_ACCESS_TOKEN` | No | Twitter/X access token |
@@ -240,7 +235,7 @@ CGO_ENABLED=0 go build -o goduckbot .
 docker pull wcatz/goduckbot:latest
 ```
 
-ARM64 images published to [Docker Hub](https://hub.docker.com/r/wcatz/goduckbot).
+Multiarch images (amd64, arm64) published to [Docker Hub](https://hub.docker.com/r/wcatz/goduckbot).
 
 ## Helm
 
@@ -256,8 +251,8 @@ helm install goduckbot oci://ghcr.io/wcatz/helm-charts/goduckbot
 | `sync.go` | Historical chain syncer (NtN ChainSync) |
 | `nonce.go` | Nonce evolution, backfill, integrity check, TICKN |
 | `leaderlog.go` | CPraos schedule, VRF key parsing, slot/epoch math |
+| `cli.go` | CLI subcommands (version, leaderlog, nonce, history) |
 | `commands.go` | Telegram bot command handlers |
-| `localquery.go` | NtC local state query (stake snapshots) |
 | `integrity.go` | Startup DB validation (FindIntersect + nonce repair) |
 | `store.go` | Store interface + SQLite implementation |
 | `db.go` | PostgreSQL implementation (pgx CopyFrom) |
@@ -266,7 +261,7 @@ helm install goduckbot oci://ghcr.io/wcatz/helm-charts/goduckbot
 
 | Library | Purpose |
 |---------|---------|
-| [blinklabs-io/gouroboros](https://github.com/blinklabs-io/gouroboros) | VRF, NtN ChainSync, NtC LocalStateQuery, ledger types |
+| [blinklabs-io/gouroboros](https://github.com/blinklabs-io/gouroboros) | VRF, NtN ChainSync, ledger types |
 | [cardano-community/koios-go-client](https://github.com/cardano-community/koios-go-client) | Koios API (stake data, nonce fallback) |
 | [jackc/pgx](https://github.com/jackc/pgx) | PostgreSQL with COPY protocol |
 | [modernc.org/sqlite](https://gitlab.com/nicedoc/modernc-sqlite) | Pure Go SQLite |
@@ -280,10 +275,3 @@ helm install goduckbot oci://ghcr.io/wcatz/helm-charts/goduckbot
 - [cncli](https://github.com/cardano-community/cncli)
 - [Koios API](https://api.koios.rest/)
 
-## License
-
-MIT
-
----
-
-Early duckBot development by [AstroWa3l](https://github.com/AstroWa3l).
