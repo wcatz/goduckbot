@@ -59,6 +59,7 @@ type Store interface {
 	MarkEpochClassified(ctx context.Context, epoch int) error
 	DeleteSlotOutcomesBefore(ctx context.Context, epoch int) (int64, error)
 	HasBlockAtSlot(ctx context.Context, slot uint64) (bool, error)
+	DeleteBlocksAfterSlot(ctx context.Context, slot uint64) (int64, error)
 	TruncateAll(ctx context.Context) error
 	Close() error
 }
@@ -649,6 +650,14 @@ func (s *SqliteStore) HasBlockAtSlot(ctx context.Context, slot uint64) (bool, er
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blocks WHERE slot = ?)`, slot).Scan(&exists)
 	return exists, err
+}
+
+func (s *SqliteStore) DeleteBlocksAfterSlot(ctx context.Context, slot uint64) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM blocks WHERE slot > ?`, slot)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *SqliteStore) TruncateAll(ctx context.Context) error {
