@@ -6,7 +6,6 @@
 mode: "lite"
 
 poolId: "YOUR_POOL_ID"
-ticker: "TICKER"
 poolName: "Pool Name"
 nodeAddress:
   # Docker Compose (UNIX socket — recommended):

@@ -33,7 +33,6 @@ Edit `config.yaml`:
 ```yaml
 mode: "lite"
 poolId: "YOUR_POOL_ID_HEX"
-ticker: "DUCK"
 poolName: "My Pool"
 nodeAddress:
   host1: "your-node:3001"
@@ -63,7 +62,8 @@ Adds full chain sync, self-computed nonces, and local leader schedule calculatio
 ```yaml
 mode: "full"
 nodeAddress:
-  host1: "your-node:3001"
+  host1: "your-node:3001"       # NtN (chain sync)
+  ntcHost: "your-node:30000"    # NtC (stake queries, tip) — or UNIX socket path
 
 leaderlog:
   enabled: true
@@ -139,10 +139,10 @@ Epoch 259's nonce is hardcoded because it is the only mainnet epoch where the `e
 
 The next epoch's nonce becomes deterministic after the stability window. duckBot triggers leader schedule calculation automatically at this point.
 
-| Era | Stability Window | Slots Before Epoch End |
-|-----|-----------------|----------------------|
-| Shelley–Babbage | `3k/f` = 302,400 slots | 129,600 (~1.5 days) |
-| Conway | `4k/f` = 259,200 slots | 172,800 (~2 days) |
+| Era | Margin (`k`/`f`) | Freeze Point | Slots Before Epoch End |
+|-----|-------------------|-------------|----------------------|
+| Shelley–Babbage | `3k/f` = 129,600 | 302,400 (70%) | 129,600 (~1.5 days) |
+| Conway | `4k/f` = 172,800 | 259,200 (60%) | 172,800 (~2 days) |
 
 ### Historical Sync Pipeline
 
@@ -172,7 +172,7 @@ sync.go (NtN ChainSync) → blockCh [10,000 buf] → batch writer → InsertBloc
 | **Set** | End of epoch N-2 | Current epoch |
 | **Go** | End of epoch N-3 | Previous epoch |
 
-Queried via Koios API.
+Queried via NtC `QueryPoolStakeSnapshots` (primary) with Koios API fallback.
 
 ### DB Integrity Check
 
@@ -188,6 +188,7 @@ If nonce is stale but blocks valid: recompute from `blocks` table.
 
 | Command | Description |
 |---------|-------------|
+| `/menu` | Inline keyboard with all commands (primary group chat interface) |
 | `/help` | Available commands |
 | `/status` | DB sync status |
 | `/tip` | Current chain tip |
@@ -254,8 +255,10 @@ helm install goduckbot oci://ghcr.io/wcatz/helm-charts/goduckbot
 | `cli.go` | CLI subcommands (version, leaderlog, nonce, history) |
 | `commands.go` | Telegram bot command handlers |
 | `integrity.go` | Startup DB validation (FindIntersect + nonce repair) |
+| `localquery.go` | NtC local state queries (QueryTip, QueryPoolStakeSnapshots) |
 | `store.go` | Store interface + SQLite implementation |
 | `db.go` | PostgreSQL implementation (pgx CopyFrom) |
+| `securekey.go` | mmap/mlock/mprotect for VRF key material |
 
 ### Key Dependencies
 
