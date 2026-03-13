@@ -280,6 +280,49 @@ func (nt *NonceTracker) ResyncFromDB() {
 	nt.blockCount = blockCount
 	nt.candidateFroze = false
 	log.Printf("ResyncFromDB: restored epoch %d, block count %d", epoch, blockCount)
+
+	// Cross-check: if blocks were bulk-inserted (CopyFrom) but the process
+	// was OOMKilled before ProcessBatch could update epoch_nonces.block_count,
+	// the nonce state is stale. Detect and recompute from raw VRF outputs.
+	actualCount, countErr := nt.store.GetBlockCountForEpoch(ctx, epoch)
+	if countErr != nil || actualCount == blockCount {
+		return
+	}
+
+	log.Printf("ResyncFromDB: block count mismatch for epoch %d (nonce tracker: %d, blocks table: %d) — recomputing",
+		epoch, blockCount, actualCount)
+
+	// Start from previous epoch's evolving nonce (nonce rolls across boundaries)
+	var etaV []byte
+	if epoch > 0 {
+		prevNonce, _, prevErr := nt.store.GetEvolvingNonce(ctx, epoch-1)
+		if prevErr == nil && prevNonce != nil {
+			etaV = prevNonce
+		}
+	}
+	if etaV == nil {
+		etaV = initialNonce(nt.fullMode)
+	}
+
+	vrfBlocks, vrfErr := nt.store.GetVrfOutputsForEpoch(ctx, epoch)
+	if vrfErr != nil {
+		log.Printf("ResyncFromDB: recompute failed for epoch %d: %v", epoch, vrfErr)
+		return
+	}
+
+	for _, b := range vrfBlocks {
+		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, nt.networkMagic)
+		etaV = evolveNonce(etaV, nonceValue)
+	}
+
+	if upsertErr := nt.store.UpsertEvolvingNonce(ctx, epoch, etaV, len(vrfBlocks)); upsertErr != nil {
+		log.Printf("ResyncFromDB: failed to persist recomputed nonce for epoch %d: %v", epoch, upsertErr)
+		return
+	}
+
+	nt.evolvingNonce = etaV
+	nt.blockCount = len(vrfBlocks)
+	log.Printf("ResyncFromDB: epoch %d recomputed from %d blocks", epoch, len(vrfBlocks))
 }
 
 // RecomputeCurrentEpochNonce recomputes the evolving nonce for a specific epoch
