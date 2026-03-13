@@ -430,81 +430,32 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 			return
 		}
 		targetEpoch = parsed
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		// Check DB first
-		stored, storeErr := i.store.GetLeaderSchedule(ctx, targetEpoch)
-		if storeErr == nil && stored != nil {
-			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
-			i.bot.Send(m.Chat, msg)
-			return
-		}
-
-		// On-demand: compute using cached nonce + NtC/Koios for stake
-		sent, sendErr := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
-		replyEpoch := func(text string) {
-			if sendErr == nil {
-				i.bot.Edit(sent, text)
-			} else {
-				i.bot.Send(m.Chat, text)
-			}
-		}
-
-		epochNonce, nonceErr := i.nonceTracker.GetNonceForEpoch(targetEpoch)
-		if nonceErr != nil {
-			replyEpoch(fmt.Sprintf("Failed to get nonce for epoch %d: %v", targetEpoch, nonceErr))
-			return
-		}
-
-		poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, targetEpoch)
-		if stakeErr != nil {
-			replyEpoch(fmt.Sprintf("Failed to get stake for epoch %d: %v", targetEpoch, stakeErr))
-			return
-		}
-
-		epochLength := GetEpochLength(i.networkMagic)
-		epochStartSlot := GetEpochStartSlot(targetEpoch, i.networkMagic)
-		slotToTimeFn := makeSlotToTime(i.networkMagic)
-
-		schedule, calcErr := CalculateLeaderSchedule(
-			targetEpoch, epochNonce, i.vrfKey,
-			poolStake, totalStake,
-			epochLength, epochStartSlot, slotToTimeFn,
-		)
-		if calcErr != nil {
-			replyEpoch(fmt.Sprintf("Failed to calculate schedule: %v", calcErr))
-			return
-		}
-
-		if storeScheduleErr := i.store.InsertLeaderSchedule(ctx, schedule); storeScheduleErr != nil {
-			log.Printf("Failed to store schedule for epoch %d: %v", targetEpoch, storeScheduleErr)
-		}
-
-		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
-		replyEpoch(msg)
-		return
 	}
 
+	i.computeAndReplyLeaderlog(m.Chat, targetEpoch)
+}
+
+// computeAndReplyLeaderlog checks the DB for an existing schedule, computes one
+// if missing, stores it, and sends the result to the given Telegram chat.
+func (i *Indexer) computeAndReplyLeaderlog(chat *telebot.Chat, targetEpoch int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	// Check for stored schedule first
+	// Check DB first
 	stored, err := i.store.GetLeaderSchedule(ctx, targetEpoch)
 	if err == nil && stored != nil {
 		msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
-		i.bot.Send(m.Chat, msg)
+		i.bot.Send(chat, msg)
 		return
 	}
 
 	// Calculate live — send progress message
-	sent, sendErr := i.bot.Send(m.Chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
+	sent, sendErr := i.bot.Send(chat, fmt.Sprintf("\u23F3 Calculating leader schedule for epoch %d...", targetEpoch))
 	reply := func(text string) {
 		if sendErr == nil {
 			i.bot.Edit(sent, text)
 		} else {
-			i.bot.Send(m.Chat, text)
+			i.bot.Send(chat, text)
 		}
 	}
 
@@ -535,7 +486,7 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	}
 
 	if storeErr := i.store.InsertLeaderSchedule(ctx, schedule); storeErr != nil {
-		log.Printf("Failed to store schedule from /leaderlog: %v", storeErr)
+		log.Printf("Failed to store schedule for epoch %d: %v", targetEpoch, storeErr)
 	}
 
 	msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
@@ -663,6 +614,7 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 	if poolStake == 0 && i.koios != nil {
 		source = "Koios"
 		koiosCtx, koiosCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer koiosCancel()
 		currentEpoch := i.getCurrentEpoch()
 		for _, tryEpoch := range []int{currentEpoch, currentEpoch - 1, currentEpoch - 2} {
 			epochNo := koios.EpochNo(tryEpoch)
@@ -679,7 +631,6 @@ func (i *Indexer) cmdStake(m *telebot.Message) {
 			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
 			break
 		}
-		koiosCancel()
 	}
 
 	if poolStake == 0 || totalStake == 0 {

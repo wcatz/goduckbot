@@ -571,6 +571,14 @@ func (s *PgStore) HasBlockAtSlot(ctx context.Context, slot uint64) (bool, error)
 	return exists, err
 }
 
+func (s *PgStore) DeleteBlocksAfterSlot(ctx context.Context, slot uint64) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM blocks WHERE slot > $1`, slot)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *PgStore) TruncateAll(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `TRUNCATE blocks, epoch_nonces, leader_schedules, slot_outcomes`)
 	return err

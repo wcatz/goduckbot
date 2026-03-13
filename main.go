@@ -113,10 +113,8 @@ type Indexer struct {
 	bot             *telebot.Bot
 	poolId          string
 	telegramChannel string
-	telegramToken   string
-	image           string
-	ticker          string
-	koios           *koios.Client
+	telegramToken string
+	koios         *koios.Client
 	bech32PoolId    string
 	epochBlocks     int
 	nodeAddresses   []string
@@ -266,14 +264,12 @@ func (i *Indexer) Start() error {
 
 	// Set the configuration values
 	i.poolId = viper.GetString("poolId")
-	i.ticker = viper.GetString("ticker")
 	i.poolName = viper.GetString("poolName")
 	i.telegramChannel = viper.GetString("telegram.channel")
 	i.telegramToken = os.Getenv("TELEGRAM_TOKEN")
 	if i.telegramToken == "" {
 		i.telegramToken = viper.GetString("telegram.token")
 	}
-	i.image = viper.GetString("image")
 	i.networkMagic = viper.GetInt("networkMagic")
 	i.duckMedia = viper.GetString("duck.media")
 	if i.duckMedia == "" {
@@ -1019,23 +1015,47 @@ func (i *Indexer) handleRollForward(ctx chainsync.CallbackContext, blockType uin
 }
 
 // handleRollBackward handles a rollback during live tail.
-func (i *Indexer) handleRollBackward(ctx chainsync.CallbackContext, point pcommon.Point, tip chainsync.Tip) error {
+// Deletes blocks beyond the rollback point and recomputes the epoch nonce
+// so that subsequent blocks (which may have different VRF outputs) are
+// processed correctly instead of being silently ignored by ON CONFLICT DO NOTHING.
+func (i *Indexer) handleRollBackward(_ chainsync.CallbackContext, point pcommon.Point, tip chainsync.Tip) error {
 	log.Printf("[live] rollback to slot %d", point.Slot)
+
+	dbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	deleted, err := i.store.DeleteBlocksAfterSlot(dbCtx, point.Slot)
+	if err != nil {
+		log.Printf("[live] rollback: failed to delete blocks after slot %d: %v", point.Slot, err)
+		return nil // non-fatal: worst case is stale VRF on conflict
+	}
+	if deleted == 0 {
+		return nil
+	}
+
+	log.Printf("[live] rollback: deleted %d blocks after slot %d", deleted, point.Slot)
+
+	// Recompute the evolving nonce for the affected epoch so incoming
+	// replacement blocks evolve from the correct state.
+	epoch := SlotToEpoch(point.Slot, i.networkMagic)
+	if i.nonceTracker != nil {
+		if err := i.nonceTracker.RecomputeCurrentEpochNonce(dbCtx, epoch); err != nil {
+			log.Printf("[live] rollback: nonce recompute for epoch %d failed: %v", epoch, err)
+		}
+	}
+
 	return nil
 }
 
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
-	// Upgrade initial GET request to a websocket
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
-	// Make sure we close the connection when the function returns
 	defer ws.Close()
 
-	// Register our new client
 	clientsMutex.Lock()
 	clients[ws] = true
 	clientsMutex.Unlock()
@@ -1046,40 +1066,37 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		clientsMutex.Unlock()
 	}()
 
+	// Clients are receive-only (server pushes block events).
+	// Block here reading until the client disconnects.
 	for {
-		var msg interface{}
-		// Read in a new message as JSON and map it to a Message object
-		err := ws.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("WebSocket read error: %v", err)
+		if _, _, err := ws.ReadMessage(); err != nil {
 			break
 		}
-		// Send the newly received message to the broadcast channel
-		broadcast <- msg
 	}
 }
 
-// Handle broadcasting the messages to clients
+// handleMessages broadcasts block events to all connected WebSocket clients.
 func handleMessages() {
-	for {
-		// Grab the next message from the broadcast channel
-		msg := <-broadcast
-		// Send it out to every client that is currently connected
+	for msg := range broadcast {
+		var failed []*websocket.Conn
+
 		clientsMutex.RLock()
 		for client := range clients {
-			err := client.WriteJSON(msg)
-			if err != nil {
+			if err := client.WriteJSON(msg); err != nil {
 				log.Printf("WebSocket write error: %v", err)
 				client.Close()
-				// Remove failed client (need write lock)
-				clientsMutex.RUnlock()
-				clientsMutex.Lock()
-				delete(clients, client)
-				clientsMutex.Unlock()
-				clientsMutex.RLock()
+				failed = append(failed, client)
 			}
 		}
 		clientsMutex.RUnlock()
+
+		if len(failed) > 0 {
+			clientsMutex.Lock()
+			for _, c := range failed {
+				delete(clients, c)
+			}
+			clientsMutex.Unlock()
+		}
 	}
 }
 
@@ -2046,7 +2063,6 @@ func makeSlotToTime(networkMagic int) func(uint64) time.Time {
 	}
 }
 
-// formatNumber formats an integer with comma separators (e.g., 1234567 -> "1,234,567").
 // truncHash returns the first n characters of a hex string.
 func truncHash(s string, n int) string {
 	if len(s) <= n {
@@ -2055,6 +2071,7 @@ func truncHash(s string, n int) string {
 	return s[:n]
 }
 
+// formatNumber formats an integer with comma separators (e.g., 1234567 -> "1,234,567").
 func formatNumber(n int64) string {
 	if n < 0 {
 		return "-" + formatNumber(-n)
