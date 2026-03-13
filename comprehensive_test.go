@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -1601,4 +1602,66 @@ func TestGetCandidateNonce(t *testing.T) {
 			t.Fatalf("expected %x, got %x", nonce, got)
 		}
 	}
+}
+
+// TestResyncFromDB_BlockCountMismatch verifies that ResyncFromDB detects and
+// recomputes the evolving nonce when epoch_nonces.block_count is stale — the
+// scenario where InsertBlockBatch (CopyFrom) succeeds but the process is
+// OOMKilled before ProcessBatch can update epoch_nonces.
+func TestResyncFromDB_BlockCountMismatch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Use preview network magic for simpler slot math
+	networkMagic := PreprodNetworkMagic
+	epoch := 10
+
+	// Insert 5 blocks for the epoch (simulating CopyFrom that succeeded)
+	epochStart := GetEpochStartSlot(epoch, networkMagic)
+	for i := 0; i < 5; i++ {
+		slot := epochStart + uint64(i*20)
+		vrf := []byte{byte(i + 1), 0x02, 0x03, 0x04}
+		hash := fmt.Sprintf("hash%d", i)
+		nonce := vrfNonceValueForEpoch(vrf, epoch, networkMagic)
+		_, err := store.InsertBlock(ctx, slot, epoch, hash, vrf, nonce)
+		if err != nil {
+			t.Fatalf("InsertBlock %d: %v", i, err)
+		}
+	}
+
+	// Set a stale evolving nonce with block_count=2 (simulating OOM after only 2 blocks processed)
+	staleNonce := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if err := store.UpsertEvolvingNonce(ctx, epoch, staleNonce, 2); err != nil {
+		t.Fatalf("UpsertEvolvingNonce: %v", err)
+	}
+
+	// Also need a previous epoch nonce for the recompute to start from
+	prevNonce := initialNonce(true)
+	if err := store.UpsertEvolvingNonce(ctx, epoch-1, prevNonce, 100); err != nil {
+		t.Fatalf("UpsertEvolvingNonce prev: %v", err)
+	}
+
+	// Create NonceTracker and call ResyncFromDB
+	nt := NewNonceTracker(store, nil, epoch, networkMagic, true)
+	nt.ResyncFromDB()
+
+	// Verify block count was corrected
+	_, repairedCount, err := store.GetEvolvingNonce(ctx, epoch)
+	if err != nil {
+		t.Fatalf("GetEvolvingNonce after resync: %v", err)
+	}
+	if repairedCount != 5 {
+		t.Fatalf("expected block_count=5 after resync repair, got %d", repairedCount)
+	}
+
+	// Verify the nonce is no longer the stale value
+	repairedNonce, _, _ := store.GetEvolvingNonce(ctx, epoch)
+	if bytes.Equal(repairedNonce, staleNonce) {
+		t.Fatal("nonce was not recomputed — still has stale value")
+	}
+
+	t.Logf("ResyncFromDB correctly recomputed nonce from 5 blocks (was stale at 2)")
 }
