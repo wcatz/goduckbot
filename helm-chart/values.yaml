@@ -3,6 +3,8 @@ replicaCount: 1
 fullname: goduckbot
 name: goduckbot
 
+podLabels: {}
+
 image:
   repository: wcatz/goduckbot
   pullPolicy: IfNotPresent
