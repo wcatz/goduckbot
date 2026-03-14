@@ -561,7 +561,18 @@ func (i *Indexer) runChainTail() error {
 		}
 	}
 
-	// Full mode: run historical sync before starting adder pipeline
+	// Start live tail immediately so block notifications work during historical sync.
+	// Nonce processing is gated by historicalSyncDone so the tracker isn't corrupted.
+	if fullMode && len(i.nodeAddresses) > 0 {
+		go func() {
+			log.Println("Starting live tail (notifications active during historical sync)...")
+			if err := i.startLiveTail(); err != nil {
+				log.Printf("Live tail error: %v", err)
+			}
+		}()
+	}
+
+	// Full mode: run historical sync (live tail already running for notifications)
 	if fullMode && len(i.nodeAddresses) > 0 {
 		log.Println("Starting historical chain sync...")
 		syncCtx, syncCancel := context.WithCancel(context.Background())
@@ -695,8 +706,14 @@ func (i *Indexer) runChainTail() error {
 		}()
 	}
 
-	// Start live tail for chain tip (both full and lite mode)
-	return i.startLiveTail()
+	// In full mode, live tail was started before historical sync (above).
+	// In lite mode, start it now.
+	if !fullMode {
+		return i.startLiveTail()
+	}
+
+	// Full mode: block forever (live tail runs in its own goroutine)
+	select {}
 }
 
 // startLiveTail starts the live chain tail using raw gouroboros NtN ChainSync.
@@ -894,8 +911,9 @@ func (i *Indexer) handleRollForward(ctx chainsync.CallbackContext, blockType uin
 		i.epochBlocks = 0
 	}
 
-	// Track VRF data for nonce evolution
-	if i.leaderlogEnabled && vrfOutput != nil {
+	// Track VRF data for nonce evolution (only after historical sync completes,
+	// otherwise historical and live tail would corrupt the nonce tracker's in-memory state)
+	if i.leaderlogEnabled && vrfOutput != nil && atomic.LoadInt32(&i.historicalSyncDone) == 1 {
 		i.nonceTracker.ProcessBlock(slot, blockEpoch, blockHash, vrfOutput)
 		i.checkLeaderlogTrigger(slot)
 	}
