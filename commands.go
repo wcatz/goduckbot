@@ -394,9 +394,6 @@ func (i *Indexer) cmdLeaderlog(m *telebot.Message) {
 	if !i.isAllowed(m) {
 		return
 	}
-	if !i.requireSynced(m) {
-		return
-	}
 
 	if !i.leaderlogEnabled || i.vrfKey == nil {
 		i.bot.Send(m.Chat, "Leaderlog not enabled (no VRF key configured)")
@@ -495,9 +492,6 @@ func (i *Indexer) computeAndReplyLeaderlog(chat *telebot.Chat, targetEpoch int) 
 
 func (i *Indexer) cmdNonce(m *telebot.Message) {
 	if !i.isGroupAllowed(m) {
-		return
-	}
-	if !i.requireSynced(m) {
 		return
 	}
 
@@ -803,9 +797,6 @@ func (i *Indexer) cmdDuck(m *telebot.Message) {
 
 func (i *Indexer) cmdNextBlock(m *telebot.Message) {
 	if !i.isAllowed(m) {
-		return
-	}
-	if !i.requireSynced(m) {
 		return
 	}
 
