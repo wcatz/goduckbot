@@ -860,6 +860,7 @@ func (i *Indexer) handleRollForward(ctx chainsync.CallbackContext, blockType uin
 	blockNumber := header.BlockNumber()
 	issuerVkeyBytes := header.IssuerVkey()
 	issuerVkey := hex.EncodeToString(issuerVkeyBytes[:])
+	issuerPoolId := ledger.NewBlake2b224(issuerVkeyBytes[:]).String()
 	bodySize := header.BlockBodySize()
 
 	// Extract VRF output (reuses extractVrfFromHeader in sync.go)
@@ -919,7 +920,7 @@ func (i *Indexer) handleRollForward(ctx chainsync.CallbackContext, blockType uin
 	}
 
 	// If the block is from our pool, fetch full block for tx count and send notifications
-	if issuerVkey == i.poolId {
+	if issuerPoolId == i.poolId {
 		i.epochBlocks++
 		i.totalBlocks++
 
