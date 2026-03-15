@@ -230,29 +230,26 @@ func calculateThreshold(poolStake, totalStake uint64, f float64) *big.Int {
 
 // IsSlotLeaderCpraos checks if pool is leader for slot using CPRAOS algorithm
 func IsSlotLeaderCpraos(slot uint64, epochNonce []byte, vrfKey *VRFKey, poolStake, totalStake uint64) (bool, error) {
+	threshold := calculateThreshold(poolStake, totalStake, ActiveSlotCoeff)
+	return isSlotLeaderWithThreshold(slot, epochNonce, vrfKey, threshold)
+}
+
+// isSlotLeaderWithThreshold checks leadership with a pre-computed threshold.
+func isSlotLeaderWithThreshold(slot uint64, epochNonce []byte, vrfKey *VRFKey, threshold *big.Int) (bool, error) {
 	if vrfKey == nil {
 		return false, fmt.Errorf("nil VRF key")
 	}
 
-	// Step 1: Create VRF input
 	vrfInput := mkInputVrf(slot, epochNonce)
 
-	// Step 2: Generate VRF proof
 	_, vrfOutput, err := vrf.Prove(vrfKey.PrivateKey, vrfInput)
 	if err != nil {
 		return false, fmt.Errorf("VRF prove failed: %w", err)
 	}
 
-	// Step 3: Compute leader value (CPRAOS specific)
 	leaderValue := vrfLeaderValue(vrfOutput)
-
-	// Step 4: Convert to big.Int
 	certLeaderVrf := new(big.Int).SetBytes(leaderValue)
 
-	// Step 5: Calculate threshold
-	threshold := calculateThreshold(poolStake, totalStake, ActiveSlotCoeff)
-
-	// Step 6: Pool is leader if certLeaderVrf < threshold
 	return certLeaderVrf.Cmp(threshold) < 0, nil
 }
 
@@ -290,8 +287,11 @@ func CalculateLeaderSchedule(
 	endSlot := epochStartSlot + epochLength
 	slotNo := 1
 
+	// Pre-compute threshold once (constant for entire epoch)
+	threshold := calculateThreshold(poolStake, totalStake, ActiveSlotCoeff)
+
 	for slot := epochStartSlot; slot < endSlot; slot++ {
-		isLeader, err := IsSlotLeaderCpraos(slot, epochNonce, vrfKey, poolStake, totalStake)
+		isLeader, err := isSlotLeaderWithThreshold(slot, epochNonce, vrfKey, threshold)
 		if err != nil {
 			return nil, fmt.Errorf("slot %d: %w", slot, err)
 		}
