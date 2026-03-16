@@ -196,7 +196,7 @@ func calcCurrentEpoch(networkMagic int) int {
 		return PreprodShelleyStartEpoch + int(shelleySeconds/float64(MainnetEpochLength))
 
 	case PreviewNetworkMagic:
-		genesis, _ := time.Parse(time.RFC3339, "2022-11-01T00:00:00Z")
+		genesis, _ := time.Parse(time.RFC3339, "2022-10-25T00:00:00Z")
 		elapsed := now.Sub(genesis).Seconds()
 		return int(elapsed / float64(PreviewEpochLength))
 
@@ -2072,7 +2072,7 @@ func makeSlotToTime(networkMagic int) func(uint64) time.Time {
 		}
 
 	case PreviewNetworkMagic:
-		genesis, _ := time.Parse(time.RFC3339, "2022-11-01T00:00:00Z")
+		genesis, _ := time.Parse(time.RFC3339, "2022-10-25T00:00:00Z")
 		return func(slot uint64) time.Time {
 			return genesis.Add(time.Duration(slot) * time.Second)
 		}
