@@ -423,7 +423,7 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	// of epoch N = hash of the second-to-last block of epoch N.
 	if nt.fullMode {
 		candidateEpoch := epoch - 1
-		etaPhEpoch := candidateEpoch // η_ph comes from the same epoch as the candidate
+		etaPhEpoch := epoch - 2 // η_ph lags by 2 epochs per Haskell tickChainDepState
 		log.Printf("TICKN: attempting to compute epoch %d nonce from candidate(%d) + η_ph(%d)",
 			epoch, candidateEpoch, etaPhEpoch)
 		candidate, candErr := nt.store.GetCandidateNonce(ctx, candidateEpoch)
