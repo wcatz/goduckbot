@@ -420,10 +420,10 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	// At 60% of epoch N, we need epoch N+1's nonce (not yet on Koios).
 	// epochNonce(N+1) = BLAKE2b-256(η_c(N) || η_ph)
 	// where η_ph = praosStateLastEpochBlockNonce = prevHash of the last block
-	// of epoch N-1 = hash of the second-to-last block of epoch N-1.
+	// of epoch N = hash of the second-to-last block of epoch N.
 	if nt.fullMode {
 		candidateEpoch := epoch - 1
-		etaPhEpoch := candidateEpoch - 1
+		etaPhEpoch := candidateEpoch // η_ph comes from the same epoch as the candidate
 		log.Printf("TICKN: attempting to compute epoch %d nonce from candidate(%d) + η_ph(%d)",
 			epoch, candidateEpoch, etaPhEpoch)
 		candidate, candErr := nt.store.GetCandidateNonce(ctx, candidateEpoch)
