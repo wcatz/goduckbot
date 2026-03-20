@@ -27,6 +27,7 @@ cp config.yaml.example config.yaml
 Edit `.env`:
 ```
 TELEGRAM_TOKEN=123456789:ABCdef_your_token_here
+GODUCKBOT_VERSION=latest
 ```
 
 Edit `config.yaml`:
@@ -212,6 +213,7 @@ Commands with subcommands show inline keyboard buttons when called without argum
 | Mainnet | `764824073` | 432,000 slots (5 days) | 5% |
 | Preprod | `1` | 432,000 slots (5 days) | 5% |
 | Preview | `2` | 86,400 slots (1 day) | 5% |
+| Sancho  | `4` | 86,400 slots (1 day) | 5% |
 
 ## Environment Variables
 
@@ -223,6 +225,19 @@ Commands with subcommands show inline keyboard buttons when called without argum
 | `TWITTER_API_KEY_SECRET` | No | Twitter/X API secret |
 | `TWITTER_ACCESS_TOKEN` | No | Twitter/X access token |
 | `TWITTER_ACCESS_TOKEN_SECRET` | No | Twitter/X access token secret |
+
+## CLI
+
+```bash
+goduckbot                       # Start daemon (default)
+goduckbot version               # Version, commit SHA, build date
+goduckbot nonce <epoch>         # Show epoch nonce (DB → computed → Koios fallback)
+goduckbot leaderlog <epoch>     # Leader schedule for a single epoch
+goduckbot leaderlog <N>-<M>     # Leader schedule for epoch range (max 10)
+goduckbot history [--force] [--from N]  # Build full historical leaderlog
+```
+
+CLI subcommands require `config.yaml` in the working directory. The `leaderlog` and `history` commands require a VRF key and database.
 
 ## Build
 
