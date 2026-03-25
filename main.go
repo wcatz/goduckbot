@@ -138,6 +138,7 @@ type Indexer struct {
 	// Duck media settings
 	duckMedia     string // "gif", "image", or "both" (default)
 	duckCustomUrl string // custom override URL
+	duckApiUrl    string // API base URL (default: random-d.uk)
 	// Social network toggles
 	telegramEnabled bool
 	twitterEnabled  bool
@@ -282,6 +283,10 @@ func (i *Indexer) Start() error {
 		i.duckMedia = "both"
 	}
 	i.duckCustomUrl = viper.GetString("duck.customUrl")
+	i.duckApiUrl = viper.GetString("duck.apiUrl")
+	if i.duckApiUrl == "" {
+		i.duckApiUrl = "https://random-d.uk/api/v2/random"
+	}
 	// Store the node addresses hosts into the array nodeAddresses in the Indexer
 	if h1 := viper.GetString("nodeAddress.host1"); h1 != "" {
 		i.nodeAddresses = append(i.nodeAddresses, h1)
@@ -1152,7 +1157,7 @@ func (i *Indexer) getDuckMedia() (string, bool, error) {
 		isGif := strings.HasSuffix(strings.ToLower(i.duckCustomUrl), ".gif")
 		return i.duckCustomUrl, isGif, nil
 	}
-	endpoint := "https://random-d.uk/api/v2/random"
+	endpoint := i.duckApiUrl
 	switch i.duckMedia {
 	case "gif":
 		endpoint += "?type=gif"
@@ -1170,7 +1175,7 @@ func (i *Indexer) getDuckMedia() (string, bool, error) {
 
 // fetchDuckByType fetches a duck with an explicit type ("gif" or "jpg"), ignoring config.
 func (i *Indexer) fetchDuckByType(mediaType string) (string, bool, error) {
-	return fetchDuckURL(fmt.Sprintf("https://random-d.uk/api/v2/random?type=%s", mediaType))
+	return fetchDuckURL(fmt.Sprintf("%s?type=%s", i.duckApiUrl, mediaType))
 }
 
 // Download image from URL to bytes
