@@ -29,6 +29,7 @@ import (
 	output_embedded "github.com/blinklabs-io/adder/output/embedded"
 	"github.com/blinklabs-io/adder/pipeline"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -727,6 +728,25 @@ func (i *Indexer) runChainTail() error {
 	select {}
 }
 
+// adderIntersectFromDB builds an intersect point from the last block in the DB,
+// backed up by 100 blocks to provide overlap for duplicate handling.
+// This ensures the adder pipeline replays any blocks missed during a restart
+// instead of skipping ahead to the tip and leaving permanent gaps.
+func (i *Indexer) adderIntersectFromDB() (ocommon.Point, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	blocks, err := i.store.GetLastNBlocks(ctx, 100)
+	if err != nil || len(blocks) == 0 {
+		return ocommon.Point{}, fmt.Errorf("no blocks in DB: %w", err)
+	}
+	oldest := blocks[len(blocks)-1]
+	hashBytes, err := hex.DecodeString(oldest.BlockHash)
+	if err != nil {
+		return ocommon.Point{}, fmt.Errorf("decoding hash for slot %d: %w", oldest.Slot, err)
+	}
+	return ocommon.NewPoint(oldest.Slot, hashBytes), nil
+}
+
 // startAdderPipeline starts the adder pipeline for live chain tail.
 // It runs an infinite restart loop: on pipeline error or stall, it stops, waits, and reconnects.
 // Auto-reconnect is disabled because adder orphans the event channel after reconnect.
@@ -734,6 +754,7 @@ func (i *Indexer) runChainTail() error {
 // arrive for 2 minutes (catches zombie state where pipeline.Stop() previously hung).
 func (i *Indexer) startAdderPipeline() error {
 	hosts := i.nodeAddresses
+	firstStart := true
 
 	for {
 		connected := false
@@ -746,9 +767,23 @@ func (i *Indexer) startAdderPipeline() error {
 				inputOpts := []chainsync.ChainSyncOptionFunc{
 					node,
 					chainsync.WithNetworkMagic(uint32(i.networkMagic)),
-					chainsync.WithIntersectTip(true),
 					chainsync.WithAutoReconnect(false),
 					chainsync.WithIncludeCbor(false),
+				}
+
+				// First start: intersect at tip for live notifications during historical sync.
+				// Restarts: intersect from last DB block to fill gaps from the dead connection.
+				// Without this, every pipeline restart loses blocks between death and new tip.
+				if !firstStart && atomic.LoadInt32(&i.historicalSyncDone) == 1 {
+					if pt, err := i.adderIntersectFromDB(); err == nil {
+						log.Printf("Pipeline resuming from slot %d (last DB block)", pt.Slot)
+						inputOpts = append(inputOpts, chainsync.WithIntersectPoints([]ocommon.Point{pt}))
+					} else {
+						log.Printf("Could not build intersect from DB (%v), falling back to tip", err)
+						inputOpts = append(inputOpts, chainsync.WithIntersectTip(true))
+					}
+				} else {
+					inputOpts = append(inputOpts, chainsync.WithIntersectTip(true))
 				}
 
 				i.pipeline = pipeline.New()
@@ -778,6 +813,7 @@ func (i *Indexer) startAdderPipeline() error {
 
 			log.Printf("Pipeline connected to node at %s", host)
 			connected = true
+			firstStart = false
 			atomic.StoreInt64(&i.lastBlockTime, time.Now().Unix())
 
 			// Start stall detector — forces restart if no blocks for 2 minutes.
