@@ -590,8 +590,9 @@ func (i *Indexer) runChainTail() error {
 		syncCtx, syncCancel := context.WithCancel(context.Background())
 		defer syncCancel()
 
-		// Buffered channel decouples fast chain sync from slower DB writes
-		blockCh := make(chan BlockData, 10000)
+		// Buffered channel decouples fast chain sync from slower DB writes.
+		// 2000 blocks × ~220 bytes ≈ 440KB — safe for 512Mi pod limit.
+		blockCh := make(chan BlockData, 2000)
 
 		onCaughtUp := func() {
 			log.Println("Historical sync caught up, stopping ChainSyncer...")

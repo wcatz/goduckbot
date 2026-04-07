@@ -106,6 +106,42 @@ func ValidateDBIntegrity(ctx context.Context, store Store, nonceTracker *NonceTr
 
 	log.Println("Layer 2 passed: blocks found on canonical chain")
 
+	// Layer 3: Block gap detection — compare recent epoch block counts against Koios.
+	// Catches silent block loss from pipeline restarts where stored blocks are valid
+	// (on canonical chain) but incomplete (missing blocks = corrupt nonce computation).
+	if nonceTracker != nil && nonceTracker.koiosClient != nil {
+		gapCtx, gapCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer gapCancel()
+		gapsFound := false
+		for checkEpoch := epoch; checkEpoch >= epoch-4 && checkEpoch >= 0; checkEpoch-- {
+			localCount, countErr := store.GetBlockCountForEpoch(gapCtx, checkEpoch)
+			if countErr != nil || localCount == 0 {
+				continue
+			}
+			koiosCount, koiosErr := nonceTracker.fetchEpochBlockCount(gapCtx, checkEpoch)
+			if koiosErr != nil || koiosCount == 0 {
+				continue
+			}
+			if localCount < koiosCount {
+				log.Printf("BLOCK GAP: epoch %d has %d blocks, Koios has %d (missing %d)",
+					checkEpoch, localCount, koiosCount, koiosCount-localCount)
+				gapsFound = true
+				// Invalidate candidate nonce for this epoch — it was computed from incomplete data
+				if delErr := store.DeleteCandidateNonce(gapCtx, checkEpoch); delErr != nil {
+					log.Printf("Failed to invalidate candidate for epoch %d: %v", checkEpoch, delErr)
+				}
+			} else {
+				log.Printf("Layer 3: epoch %d block count OK (%d)", checkEpoch, localCount)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if gapsFound {
+			log.Println("Layer 3: block gaps detected in recent epochs — candidate nonces invalidated")
+		} else {
+			log.Println("Layer 3 passed: recent epoch block counts match Koios")
+		}
+	}
+
 	// If blocks are valid but nonce is stale, repair it
 	if nonceStale {
 		log.Printf("Repairing stale nonce for epoch %d from blocks table...", epoch)

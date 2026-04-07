@@ -36,6 +36,7 @@ type Store interface {
 	InsertBlockBatch(ctx context.Context, blocks []BlockData) (int, error)
 	UpsertEvolvingNonce(ctx context.Context, epoch int, nonce []byte, blockCount int) error
 	SetCandidateNonce(ctx context.Context, epoch int, nonce []byte) error
+	DeleteCandidateNonce(ctx context.Context, epoch int) error
 	SetFinalNonce(ctx context.Context, epoch int, nonce []byte, source string) error
 	GetFinalNonce(ctx context.Context, epoch int) ([]byte, error)
 	GetEvolvingNonce(ctx context.Context, epoch int) ([]byte, int, error)
@@ -204,6 +205,14 @@ func (s *SqliteStore) SetCandidateNonce(ctx context.Context, epoch int, nonce []
 		   candidate_nonce = excluded.candidate_nonce,
 		   updated_at = datetime('now')`,
 		epoch, nonce, nonce,
+	)
+	return err
+}
+
+func (s *SqliteStore) DeleteCandidateNonce(ctx context.Context, epoch int) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE epoch_nonces SET candidate_nonce = NULL, updated_at = datetime('now') WHERE epoch = ?`,
+		epoch,
 	)
 	return err
 }
