@@ -132,6 +132,14 @@ func (s *PgStore) SetCandidateNonce(ctx context.Context, epoch int, nonce []byte
 	return err
 }
 
+func (s *PgStore) DeleteCandidateNonce(ctx context.Context, epoch int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE epoch_nonces SET candidate_nonce = NULL, updated_at = NOW() WHERE epoch = $1`,
+		epoch,
+	)
+	return err
+}
+
 func (s *PgStore) SetFinalNonce(ctx context.Context, epoch int, nonce []byte, source string) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO epoch_nonces (epoch, evolving_nonce, final_nonce, source, updated_at)

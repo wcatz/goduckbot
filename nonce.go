@@ -430,8 +430,21 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 		if candErr != nil {
 			log.Printf("TICKN: GetCandidateNonce(%d) failed: %v", candidateEpoch, candErr)
 		} else if candidate == nil {
-			log.Printf("TICKN: GetCandidateNonce(%d) returned nil", candidateEpoch)
+			log.Printf("TICKN: GetCandidateNonce(%d) returned nil (invalidated or missing)", candidateEpoch)
 		} else {
+			// Verify the candidate epoch has complete block coverage before trusting it.
+			// A candidate computed from incomplete chain data (block gaps) is wrong.
+			localCount, _ := nt.store.GetBlockCountForEpoch(ctx, candidateEpoch)
+			if nt.koiosClient != nil && localCount > 0 {
+				koiosCount, koiosErr := nt.fetchEpochBlockCount(ctx, candidateEpoch)
+				if koiosErr == nil && koiosCount > 0 && localCount < koiosCount {
+					log.Printf("TICKN: candidate epoch %d has %d blocks, Koios has %d — skipping TICKN (incomplete data)",
+						candidateEpoch, localCount, koiosCount)
+					candidate = nil
+				}
+			}
+		}
+		if candidate != nil {
 			log.Printf("TICKN: got candidate for epoch %d: %s", candidateEpoch, hex.EncodeToString(candidate))
 			// η_ph = prevHash of the last block of etaPhEpoch = hash of second-to-last block.
 			// This matches how ComputeEpochNonce tracks labNonce via prevBlockHash.
@@ -673,6 +686,11 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 						log.Printf("Epoch %d: computed %s… != Koios %s… — using Koios",
 							epoch, computedHex[:16], koiosHex[:16])
 						eta0 = koiosNonce
+						// Candidate nonce was computed from the same incomplete chain data.
+						// Invalidate it so TICKN won't use a corrupt candidate for epoch+1.
+						if delErr := nt.store.DeleteCandidateNonce(ctx, epoch); delErr != nil {
+							log.Printf("Failed to invalidate candidate nonce for epoch %d: %v", epoch, delErr)
+						}
 					}
 				}
 				time.Sleep(50 * time.Millisecond) // rate limit
@@ -1050,4 +1068,37 @@ func (nt *NonceTracker) fetchNonceFromKoios(ctx context.Context, epoch int) ([]b
 	}
 
 	return nonce, nil
+}
+
+// fetchEpochBlockCount returns the total block count for an epoch from Koios epoch_info.
+func (nt *NonceTracker) fetchEpochBlockCount(ctx context.Context, epoch int) (int, error) {
+	url := fmt.Sprintf(koiosRESTBase(nt.networkMagic)+"/epoch_info?_epoch_no=%d&select=blk_count", epoch)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := koiosHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("koios returned %d", resp.StatusCode)
+	}
+
+	var result []struct {
+		BlkCount int `json:"blk_count"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+	if len(result) == 0 {
+		return 0, fmt.Errorf("no epoch_info for epoch %d", epoch)
+	}
+	return result[0].BlkCount, nil
 }
