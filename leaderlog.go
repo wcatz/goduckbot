@@ -43,6 +43,9 @@ const (
 	// PreprodShelleyStartEpoch is the first Shelley epoch on preprod
 	PreprodShelleyStartEpoch = 4
 
+	// PreviewShelleyStartEpoch — preview has no Byron era, starts at epoch 0
+	PreviewShelleyStartEpoch = 0
+
 	// BabbageStartEpoch is the first Babbage (CPraos) epoch on mainnet (Vasil hard fork)
 	BabbageStartEpoch = 365
 

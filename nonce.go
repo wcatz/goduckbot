@@ -16,9 +16,40 @@ import (
 	"golang.org/x/crypto/blake2b"
 )
 
-// ShelleyGenesisHash is the hash of the Shelley genesis block on mainnet.
-// Used as the initial eta_v seed for full chain sync nonce evolution.
-const ShelleyGenesisHash = "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81"
+// Network-specific genesis nonces — the initial eta_v seed for nonce evolution.
+// Each network's first post-Byron epoch nonce is determined by its genesis config.
+const (
+	MainnetGenesisNonce = "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81"
+	PreprodGenesisNonce = "162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86"
+	PreviewGenesisNonce = "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d"
+)
+
+// ShelleyGenesisHash is an alias for MainnetGenesisNonce (backward compat).
+const ShelleyGenesisHash = MainnetGenesisNonce
+
+// genesisNonceForNetwork returns the initial eta_v seed for the given network.
+func genesisNonceForNetwork(networkMagic int) string {
+	switch networkMagic {
+	case PreprodNetworkMagic:
+		return PreprodGenesisNonce
+	case PreviewNetworkMagic:
+		return PreviewGenesisNonce
+	default:
+		return MainnetGenesisNonce
+	}
+}
+
+// shelleyStartForNetwork returns the first post-Byron epoch for the given network.
+func shelleyStartForNetwork(networkMagic int) int {
+	switch networkMagic {
+	case PreprodNetworkMagic:
+		return PreprodShelleyStartEpoch
+	case PreviewNetworkMagic:
+		return PreviewShelleyStartEpoch
+	default:
+		return ShelleyStartEpoch
+	}
+}
 
 // knownEpochNonces overrides self-computed nonces for epochs that require
 // protocol parameters we don't track (e.g., extra_entropy).
@@ -64,17 +95,17 @@ func NewNonceTracker(store Store, koiosClient *koios.Client, epoch, networkMagic
 		nt.blockCount = blockCount
 		log.Printf("Restored evolving nonce for epoch %d (block count: %d)", epoch, blockCount)
 	} else {
-		nt.evolvingNonce = initialNonce(fullMode)
+		nt.evolvingNonce = initialNonce(fullMode, networkMagic)
 		log.Printf("Starting fresh nonce tracking for epoch %d (full=%v)", epoch, fullMode)
 	}
 
 	return nt
 }
 
-// initialNonce returns the initial eta_v seed based on mode.
-func initialNonce(fullMode bool) []byte {
+// initialNonce returns the initial eta_v seed based on mode and network.
+func initialNonce(fullMode bool, networkMagic int) []byte {
 	if fullMode {
-		seed, _ := hex.DecodeString(ShelleyGenesisHash)
+		seed, _ := hex.DecodeString(genesisNonceForNetwork(networkMagic))
 		return seed
 	}
 	return make([]byte, 32)
@@ -301,7 +332,7 @@ func (nt *NonceTracker) ResyncFromDB() {
 		}
 	}
 	if etaV == nil {
-		etaV = initialNonce(nt.fullMode)
+		etaV = initialNonce(nt.fullMode, nt.networkMagic)
 	}
 
 	vrfBlocks, vrfErr := nt.store.GetVrfOutputsForEpoch(ctx, epoch)
@@ -344,7 +375,7 @@ func (nt *NonceTracker) RecomputeCurrentEpochNonce(ctx context.Context, epoch in
 		}
 	}
 	if etaV == nil {
-		etaV = initialNonce(nt.fullMode)
+		etaV = initialNonce(nt.fullMode, nt.networkMagic)
 		log.Printf("RecomputeCurrentEpochNonce: no previous epoch nonce, using initial seed")
 	}
 
@@ -500,15 +531,12 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 		return nonce, nil
 	}
 
-	shelleyStart := ShelleyStartEpoch
-	if nt.networkMagic == PreprodNetworkMagic {
-		shelleyStart = PreprodShelleyStartEpoch
-	}
+	shelleyStart := shelleyStartForNetwork(nt.networkMagic)
 	if targetEpoch <= shelleyStart {
 		return nil, fmt.Errorf("cannot compute nonce for epoch %d (shelley starts at %d)", targetEpoch, shelleyStart)
 	}
 
-	genesisHash, _ := hex.DecodeString(ShelleyGenesisHash)
+	genesisHash, _ := hex.DecodeString(genesisNonceForNetwork(nt.networkMagic))
 	etaV := make([]byte, 32)
 	copy(etaV, genesisHash)
 	eta0 := make([]byte, 32)
@@ -616,12 +644,9 @@ func (nt *NonceTracker) ComputeEpochNonce(ctx context.Context, targetEpoch int) 
 // already have a final_nonce. After completion, verifies the latest nonce
 // against Koios as an integrity check.
 func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
-	shelleyStart := ShelleyStartEpoch
-	if nt.networkMagic == PreprodNetworkMagic {
-		shelleyStart = PreprodShelleyStartEpoch
-	}
+	shelleyStart := shelleyStartForNetwork(nt.networkMagic)
 
-	genesisHash, _ := hex.DecodeString(ShelleyGenesisHash)
+	genesisHash, _ := hex.DecodeString(genesisNonceForNetwork(nt.networkMagic))
 	etaV := make([]byte, 32)
 	copy(etaV, genesisHash)
 	etaC := make([]byte, 32)
@@ -790,12 +815,9 @@ type IntegrityReport struct {
 // compares each against both the locally stored nonce and the Koios API.
 // This is the definitive end-to-end verification of the nonce pipeline.
 func (nt *NonceTracker) NonceIntegrityCheck(ctx context.Context) (*IntegrityReport, error) {
-	shelleyStart := ShelleyStartEpoch
-	if nt.networkMagic == PreprodNetworkMagic {
-		shelleyStart = PreprodShelleyStartEpoch
-	}
+	shelleyStart := shelleyStartForNetwork(nt.networkMagic)
 
-	genesisHash, _ := hex.DecodeString(ShelleyGenesisHash)
+	genesisHash, _ := hex.DecodeString(genesisNonceForNetwork(nt.networkMagic))
 	etaV := make([]byte, 32)
 	copy(etaV, genesisHash)
 	etaC := make([]byte, 32)
