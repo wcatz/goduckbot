@@ -342,8 +342,8 @@ func TestHashConcatNonCommutative(t *testing.T) {
 }
 
 func TestInitialNonceModes(t *testing.T) {
-	full := initialNonce(true)
-	lite := initialNonce(false)
+	full := initialNonce(true, MainnetNetworkMagic)
+	lite := initialNonce(false, MainnetNetworkMagic)
 
 	if len(full) != 32 {
 		t.Fatalf("full mode nonce length: %d", len(full))
@@ -1639,7 +1639,7 @@ func TestResyncFromDB_BlockCountMismatch(t *testing.T) {
 	}
 
 	// Also need a previous epoch nonce for the recompute to start from
-	prevNonce := initialNonce(true)
+	prevNonce := initialNonce(true, MainnetNetworkMagic)
 	if err := store.UpsertEvolvingNonce(ctx, epoch-1, prevNonce, 100); err != nil {
 		t.Fatalf("UpsertEvolvingNonce prev: %v", err)
 	}
