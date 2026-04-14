@@ -773,9 +773,12 @@ func (i *Indexer) startAdderPipeline() error {
 				}
 
 				// First start: intersect at tip for live notifications during historical sync.
-				// Restarts: intersect from last DB block to fill gaps from the dead connection.
-				// Without this, every pipeline restart loses blocks between death and new tip.
-				if !firstStart && atomic.LoadInt32(&i.historicalSyncDone) == 1 {
+				// Restarts (full mode only): intersect from last DB block to fill gaps from
+				// the dead connection. Lite mode always intersects at tip — replay would
+				// double-count pool blocks in epochBlocks/totalBlocks on every reconnect
+				// since those counters are not idempotent. Lite mode uses Koios backfill
+				// for nonce correctness so replay is not needed.
+				if !firstStart && i.mode == "full" && atomic.LoadInt32(&i.historicalSyncDone) == 1 {
 					if pt, err := i.adderIntersectFromDB(); err == nil {
 						log.Printf("Pipeline resuming from slot %d (last DB block)", pt.Slot)
 						inputOpts = append(inputOpts, chainsync.WithIntersectPoints([]ocommon.Point{pt}))
@@ -785,6 +788,15 @@ func (i *Indexer) startAdderPipeline() error {
 					}
 				} else {
 					inputOpts = append(inputOpts, chainsync.WithIntersectTip(true))
+					// In lite mode, re-sync epoch block count from Koios on reconnect
+					// so the counter is correct even if blocks were missed during the gap.
+					if !firstStart && i.mode != "full" {
+						epoch := koios.EpochNo(i.getCurrentEpoch())
+						if eb, err := i.koios.GetPoolBlocks(context.Background(), koios.PoolID(i.bech32PoolId), &epoch, nil); err == nil && eb.Data != nil {
+							i.epochBlocks = len(eb.Data)
+							log.Printf("Resynced epoch block count from Koios: %d", i.epochBlocks)
+						}
+					}
 				}
 
 				i.pipeline = pipeline.New()
