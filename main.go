@@ -1016,7 +1016,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				"Cexplorer: "+cexplorerLink+"%s",
 			i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
 			timeDiffString, i.epochBlocks, i.totalBlocks,
-			blockEvent.Context.BlockNumber, blockEvent.Payload.BlockHash)
+			blockEvent.Context.SlotNumber, blockEvent.Payload.BlockHash)
 
 		// Get duck media for notifications
 		mediaURL, isGif, mediaErr := i.getDuckMedia()
