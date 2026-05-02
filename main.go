@@ -167,6 +167,7 @@ type Indexer struct {
 	syncer              *ChainSyncer      // nil in lite mode
 	lastBlockTime       int64             // atomic: unix timestamp of last block received
 	historicalSyncDone  int32             // atomic: 0 = syncing, 1 = done (lite mode starts at 1)
+	replayFenceSlot     uint64            // atomic: slots <= this are replays on full-mode reconnect
 	leaderlogArmedAt    time.Time         // don't auto-trigger leaderlog before this time
 }
 
@@ -782,6 +783,14 @@ func (i *Indexer) startAdderPipeline() error {
 					if pt, err := i.adderIntersectFromDB(); err == nil {
 						log.Printf("Pipeline resuming from slot %d (last DB block)", pt.Slot)
 						inputOpts = append(inputOpts, chainsync.WithIntersectPoints([]ocommon.Point{pt}))
+						// Record DB tip as fence: blocks at or before this slot are
+						// already counted and notified — suppress double-processing.
+						fCtx, fCancel := context.WithTimeout(context.Background(), 5*time.Second)
+						if fenceSlot, fErr := i.store.GetLastSyncedSlot(fCtx); fErr == nil {
+							atomic.StoreUint64(&i.replayFenceSlot, fenceSlot)
+							log.Printf("Replay fence set at slot %d (replayed blocks suppressed)", fenceSlot)
+						}
+						fCancel()
 					} else {
 						log.Printf("Could not build intersect from DB (%v), falling back to tip", err)
 						inputOpts = append(inputOpts, chainsync.WithIntersectTip(true))
@@ -1000,76 +1009,28 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		i.checkLeaderlogTrigger(blockEvent.Context.SlotNumber)
 	}
 
-	// If the block event is from the pool, process it
+	// If the block event is from the pool, process it.
+	// Skip notification and counting for slots within the replay fence — those
+	// blocks are already counted from the pre-disconnect run; the 100-block
+	// overlap window on full-mode reconnect would otherwise double-count them.
 	if blockEvent.Payload.IssuerVkey == i.poolId {
-		i.epochBlocks++
-		i.totalBlocks++
+		if fence := atomic.LoadUint64(&i.replayFenceSlot); fence > 0 && blockEvent.Context.SlotNumber <= fence {
+			log.Printf("[MINTED-REPLAY] slot %d (fenced, skipping count/notify)", blockEvent.Context.SlotNumber)
+		} else {
+			i.epochBlocks++
+			i.totalBlocks++
 
-		blockSizeKB := float64(blockEvent.Payload.BlockBodySize) / 1024
-		sizePercentage := (blockSizeKB / fullBlockSize) * 100
+			blockSizeKB := float64(blockEvent.Payload.BlockBodySize) / 1024
+			sizePercentage := (blockSizeKB / fullBlockSize) * 100
 
-		log.Printf("[MINTED] slot %d | hash %s | txs %d | %.1fKB (%.0f%%) | epoch %d | lifetime %d",
-			blockEvent.Context.SlotNumber,
-			truncHash(blockEvent.Payload.BlockHash, 16),
-			blockEvent.Payload.TransactionCount,
-			blockSizeKB, sizePercentage,
-			i.epochBlocks, i.totalBlocks)
+			log.Printf("[MINTED] slot %d | hash %s | txs %d | %.1fKB (%.0f%%) | epoch %d | lifetime %d",
+				blockEvent.Context.SlotNumber,
+				truncHash(blockEvent.Payload.BlockHash, 16),
+				blockEvent.Payload.TransactionCount,
+				blockSizeKB, sizePercentage,
+				i.epochBlocks, i.totalBlocks)
 
-		msg := fmt.Sprintf(
-			"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
-				"%s\n"+"\U0001F4A5 New Block!\n\n"+
-				"Tx Count: %d\n"+
-				"Block Size: %.2f KB\n"+
-				"%.2f%% Full\n"+
-				"Interval: %s\n\n"+
-				"Epoch Blocks: %d\n"+
-				"Lifetime Blocks: %d\n\n"+
-				"Pooltool: https://pooltool.io/realtime/%d\n\n"+
-				"Cexplorer: "+cexplorerLink+"%s",
-			i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
-			timeDiffString, i.epochBlocks, i.totalBlocks,
-			blockEvent.Context.SlotNumber, blockEvent.Payload.BlockHash)
-
-		// Get duck media for notifications
-		mediaURL, isGif, mediaErr := i.getDuckMedia()
-		if mediaErr != nil {
-			log.Printf("failed to fetch duck media: %v", mediaErr)
-		}
-
-		// Send Telegram notification if enabled
-		if i.telegramEnabled && i.bot != nil {
-			channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
-			if err != nil {
-				log.Printf("failed to parse telegram channel ID: %s", err)
-			} else {
-				chat := &telebot.Chat{ID: channelID}
-				sent := false
-				if mediaURL != "" {
-					if isGif {
-						animation := &telebot.Animation{File: telebot.FromURL(mediaURL), Caption: msg}
-						if _, err = i.bot.Send(chat, animation); err != nil {
-							log.Printf("failed to send Telegram GIF: %s", err)
-						} else {
-							sent = true
-						}
-					} else {
-						photo := &telebot.Photo{File: telebot.FromURL(mediaURL), Caption: msg}
-						if _, err = i.bot.Send(chat, photo); err != nil {
-							log.Printf("failed to send Telegram photo: %s", err)
-						} else {
-							sent = true
-						}
-					}
-				}
-				if !sent {
-					i.bot.Send(chat, msg)
-				}
-			}
-		}
-
-		// Send tweet if Twitter is enabled (same format as Telegram minus links)
-		if i.twitterEnabled {
-			tweetMsg := fmt.Sprintf(
+			msg := fmt.Sprintf(
 				"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
 					"%s\n"+"\U0001F4A5 New Block!\n\n"+
 					"Tx Count: %d\n"+
@@ -1077,12 +1038,67 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 					"%.2f%% Full\n"+
 					"Interval: %s\n\n"+
 					"Epoch Blocks: %d\n"+
-					"Lifetime Blocks: %d",
+					"Lifetime Blocks: %d\n\n"+
+					"Pooltool: https://pooltool.io/realtime/%d\n\n"+
+					"Cexplorer: "+cexplorerLink+"%s",
 				i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
-				timeDiffString, i.epochBlocks, i.totalBlocks)
+				timeDiffString, i.epochBlocks, i.totalBlocks,
+				blockEvent.Context.SlotNumber, blockEvent.Payload.BlockHash)
 
-			if err := i.sendTweet(tweetMsg, mediaURL, isGif); err != nil {
-				log.Printf("failed to send tweet: %s", err)
+			// Get duck media for notifications
+			mediaURL, isGif, mediaErr := i.getDuckMedia()
+			if mediaErr != nil {
+				log.Printf("failed to fetch duck media: %v", mediaErr)
+			}
+
+			// Send Telegram notification if enabled
+			if i.telegramEnabled && i.bot != nil {
+				channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
+				if err != nil {
+					log.Printf("failed to parse telegram channel ID: %s", err)
+				} else {
+					chat := &telebot.Chat{ID: channelID}
+					sent := false
+					if mediaURL != "" {
+						if isGif {
+							animation := &telebot.Animation{File: telebot.FromURL(mediaURL), Caption: msg}
+							if _, err = i.bot.Send(chat, animation); err != nil {
+								log.Printf("failed to send Telegram GIF: %s", err)
+							} else {
+								sent = true
+							}
+						} else {
+							photo := &telebot.Photo{File: telebot.FromURL(mediaURL), Caption: msg}
+							if _, err = i.bot.Send(chat, photo); err != nil {
+								log.Printf("failed to send Telegram photo: %s", err)
+							} else {
+								sent = true
+							}
+						}
+					}
+					if !sent {
+						i.bot.Send(chat, msg)
+					}
+				}
+			}
+
+			// Send tweet if Twitter is enabled (same format as Telegram minus links)
+			if i.twitterEnabled {
+				tweetMsg := fmt.Sprintf(
+					"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
+						"%s\n"+"\U0001F4A5 New Block!\n\n"+
+						"Tx Count: %d\n"+
+						"Block Size: %.2f KB\n"+
+						"%.2f%% Full\n"+
+						"Interval: %s\n\n"+
+						"Epoch Blocks: %d\n"+
+						"Lifetime Blocks: %d",
+					i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
+					timeDiffString, i.epochBlocks, i.totalBlocks)
+
+				if err := i.sendTweet(tweetMsg, mediaURL, isGif); err != nil {
+					log.Printf("failed to send tweet: %s", err)
+				}
 			}
 		}
 	}
@@ -1516,6 +1532,55 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 			i.leaderlogMu.Unlock()
 		}()
 	}
+
+	// Catch-up: if the CURRENT epoch's schedule was never computed (nonce was
+	// unavailable during the previous epoch's stability window), attempt it now.
+	// This runs unconditionally so it also fires when we're already past the
+	// stability window for nextEpoch and curEpoch was still skipped.
+	// Koios publishes the nonce once an epoch starts, so this should succeed.
+	curEpoch := i.epoch
+	i.leaderlogMu.Lock()
+	if i.leaderlogCalcing[curEpoch] || i.scheduleExists[curEpoch] {
+		i.leaderlogMu.Unlock()
+		return
+	}
+	if failedAt, ok := i.leaderlogFailed[curEpoch]; ok && time.Since(failedAt) < 15*time.Minute {
+		i.leaderlogMu.Unlock()
+		return
+	}
+	catchCtx, catchCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	existingSched, catchErr := i.store.GetLeaderSchedule(catchCtx, curEpoch)
+	catchCancel()
+	if catchErr == nil && existingSched != nil {
+		i.scheduleExists[curEpoch] = true
+		i.leaderlogMu.Unlock()
+		return
+	}
+	i.leaderlogCalcing[curEpoch] = true
+	i.leaderlogMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("leaderlog goroutine panic for epoch %d: %v", curEpoch, r)
+				i.leaderlogMu.Lock()
+				delete(i.leaderlogCalcing, curEpoch)
+				i.leaderlogFailed[curEpoch] = time.Now()
+				i.leaderlogMu.Unlock()
+			}
+		}()
+		log.Printf("[leaderlog] catch-up: computing missed schedule for current epoch %d", curEpoch)
+		success := i.calculateAndPostLeaderlog(curEpoch)
+		i.leaderlogMu.Lock()
+		delete(i.leaderlogCalcing, curEpoch)
+		if !success {
+			i.leaderlogFailed[curEpoch] = time.Now()
+		} else {
+			delete(i.leaderlogFailed, curEpoch)
+			i.scheduleExists[curEpoch] = true
+		}
+		i.leaderlogMu.Unlock()
+	}()
 }
 
 // queryStakeForLeaderlog retrieves pool and total stake for the given target epoch.
