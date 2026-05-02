@@ -112,7 +112,7 @@ var upgrader = websocket.Upgrader{
 var globalIndexer = &Indexer{}
 
 // Block interval tracking for adder live tail
-var prevBlockTimestamp time.Time
+var prevSlotNumber uint64
 var timeDiffString string
 
 // Tracks goroutines leaked when pipeline.Stop() times out
@@ -942,29 +942,21 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		return nil
 	}
 
-	// Convert the block event timestamp to time.Time
-	blockEventTime, err := time.Parse(time.RFC3339, blockEvent.Timestamp)
-	if err != nil {
-		log.Printf("error parsing block event timestamp, skipping: %v", err)
-		return nil
-	}
-
-	// Calculate the time difference between the current block event and the previous one
-	if prevBlockTimestamp.IsZero() {
+	// Calculate interval using slot number difference (1 slot = 1 second in Shelley+)
+	currentSlot := blockEvent.Context.SlotNumber
+	if prevSlotNumber == 0 {
 		timeDiffString = "first"
 	} else {
-		timeDiff := blockEventTime.Sub(prevBlockTimestamp)
-		if timeDiff.Seconds() < 60 {
-			timeDiffString = fmt.Sprintf("%.0fs", timeDiff.Seconds())
+		slotDiff := currentSlot - prevSlotNumber
+		if slotDiff < 60 {
+			timeDiffString = fmt.Sprintf("%ds", slotDiff)
 		} else {
-			minutes := int(timeDiff.Minutes())
-			seconds := int(timeDiff.Seconds()) - (minutes * 60)
+			minutes := slotDiff / 60
+			seconds := slotDiff % 60
 			timeDiffString = fmt.Sprintf("%dm%02ds", minutes, seconds)
 		}
 	}
-
-	// Update the previous block event timestamp with the current one
-	prevBlockTimestamp = blockEventTime
+	prevSlotNumber = currentSlot
 
 	// Log clean block line: slot, hash, nonce (VRF output)
 	vrfHex := ""
