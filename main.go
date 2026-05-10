@@ -812,7 +812,7 @@ func (i *Indexer) startAdderPipeline() error {
 				input_chainsync := chainsync.New(inputOpts...)
 				i.pipeline.AddInput(input_chainsync)
 
-				filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block"}))
+				filterEvent := filter_event.New(filter_event.WithTypes([]string{"chainsync.block", "chainsync.rollback"}))
 				i.pipeline.AddFilter(filterEvent)
 
 				output := output_embedded.New(output_embedded.WithCallbackFunc(i.handleEvent))
@@ -916,6 +916,19 @@ func (i *Indexer) startAdderPipeline() error {
 
 // handleEvent processes a block event from the adder pipeline (live tail).
 func (i *Indexer) handleEvent(evt event.Event) error {
+	// Handle rollback: remove forked blocks from DB so they don't become stale intersection points
+	if evt.Type == "chainsync.rollback" {
+		if rb, ok := evt.Payload.(event.RollbackEvent); ok {
+			n, err := i.store.DeleteBlocksAfterSlot(context.Background(), rb.SlotNumber)
+			if err != nil {
+				log.Printf("rollback: failed to delete blocks after slot %d: %v", rb.SlotNumber, err)
+			} else if n > 0 {
+				log.Printf("rollback to slot %d: removed %d forked blocks from DB", rb.SlotNumber, n)
+			}
+		}
+		return nil
+	}
+
 	// Update liveness tracker for stall detection
 	atomic.StoreInt64(&i.lastBlockTime, time.Now().Unix())
 
