@@ -477,23 +477,18 @@ func (i *Indexer) Start() error {
 	// Get lifetime blocks
 	lifetimeBlocks, err := i.koios.GetPoolInfo(context.Background(), koios.PoolID(i.bech32PoolId), nil)
 	if err != nil {
-		log.Fatalf("failed to get pool lifetime blocks: %s", err)
+		log.Printf("warning: failed to get pool lifetime blocks: %s (starting with 0)", err)
+	} else if lifetimeBlocks.Data != nil {
+		i.totalBlocks = lifetimeBlocks.Data.BlockCount
 	}
 
 	// Get epoch blocks
 	epoch := koios.EpochNo(i.epoch)
 	epochBlocks, err := i.koios.GetPoolBlocks(context.Background(), koios.PoolID(i.bech32PoolId), &epoch, nil)
-
-	if epochBlocks.Data != nil {
+	if err != nil {
+		log.Printf("warning: failed to get pool epoch blocks: %s (starting with 0)", err)
+	} else if epochBlocks.Data != nil {
 		i.epochBlocks = len(epochBlocks.Data)
-	} else {
-		log.Fatalf("failed to get pool epoch blocks: %s", err)
-	}
-
-	if lifetimeBlocks.Data != nil {
-		i.totalBlocks = lifetimeBlocks.Data.BlockCount
-	} else {
-		log.Fatalf("failed to get pool lifetime blocks: %s", err)
 	}
 	log.Println("quack(duckBot initialized)")
 	log.Printf("duckBot started: %s | Epoch: %d | Epoch Blocks: %d | Lifetime Blocks: %d | Mode: %s",
