@@ -919,7 +919,9 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	// Handle rollback: remove forked blocks from DB so they don't become stale intersection points
 	if evt.Type == "chainsync.rollback" {
 		if rb, ok := evt.Payload.(event.RollbackEvent); ok {
-			n, err := i.store.DeleteBlocksAfterSlot(context.Background(), rb.SlotNumber)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			n, err := i.store.DeleteBlocksAfterSlot(ctx, rb.SlotNumber)
 			if err != nil {
 				log.Printf("rollback: failed to delete blocks after slot %d: %v", rb.SlotNumber, err)
 			} else if n > 0 {
