@@ -768,6 +768,19 @@ func (i *Indexer) startAdderPipeline() error {
 					chainsync.WithIncludeCbor(false),
 				}
 
+				// Always fence at DB tip in full mode — any block already in the DB was
+				// already counted and notified; suppress re-notification regardless of
+				// whether this is a first start, a pipeline crash restart, or a restart
+				// during an in-progress historical sync (historicalSyncDone may be 0).
+				if i.mode == "full" {
+					fCtx, fCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if fenceSlot, fErr := i.store.GetLastSyncedSlot(fCtx); fErr == nil && fenceSlot > 0 {
+						atomic.StoreUint64(&i.replayFenceSlot, fenceSlot)
+						log.Printf("Replay fence set at slot %d (replayed blocks suppressed)", fenceSlot)
+					}
+					fCancel()
+				}
+
 				// First start: intersect at tip for live notifications during historical sync.
 				// Restarts (full mode only): intersect from last DB block to fill gaps from
 				// the dead connection. Lite mode always intersects at tip — replay would
@@ -778,14 +791,6 @@ func (i *Indexer) startAdderPipeline() error {
 					if pt, err := i.adderIntersectFromDB(); err == nil {
 						log.Printf("Pipeline resuming from slot %d (last DB block)", pt.Slot)
 						inputOpts = append(inputOpts, chainsync.WithIntersectPoints([]ocommon.Point{pt}))
-						// Record DB tip as fence: blocks at or before this slot are
-						// already counted and notified — suppress double-processing.
-						fCtx, fCancel := context.WithTimeout(context.Background(), 5*time.Second)
-						if fenceSlot, fErr := i.store.GetLastSyncedSlot(fCtx); fErr == nil {
-							atomic.StoreUint64(&i.replayFenceSlot, fenceSlot)
-							log.Printf("Replay fence set at slot %d (replayed blocks suppressed)", fenceSlot)
-						}
-						fCancel()
 					} else {
 						log.Printf("Could not build intersect from DB (%v), falling back to tip", err)
 						inputOpts = append(inputOpts, chainsync.WithIntersectTip(true))
