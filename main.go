@@ -1504,9 +1504,15 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		existing, err := i.store.GetLeaderSchedule(ctx, nextEpoch)
 		cancel()
 		if err == nil && existing != nil {
-			i.scheduleExists[nextEpoch] = true
-			i.leaderlogMu.Unlock()
-			return
+			nonceCtx, nonceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			currentNonce, nonceErr := i.store.GetFinalNonce(nonceCtx, nextEpoch)
+			nonceCancel()
+			if nonceErr != nil || currentNonce == nil || hex.EncodeToString(currentNonce) == existing.EpochNonce {
+				i.scheduleExists[nextEpoch] = true
+				i.leaderlogMu.Unlock()
+				return
+			}
+			log.Printf("[leaderlog] epoch %d: advance schedule stale (nonce changed) — recomputing", nextEpoch)
 		}
 		// Cooldown: don't retry for 15 minutes after a failed attempt
 		if failedAt, ok := i.leaderlogFailed[nextEpoch]; ok && time.Since(failedAt) < 15*time.Minute {
@@ -1558,9 +1564,15 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	existingSched, catchErr := i.store.GetLeaderSchedule(catchCtx, curEpoch)
 	catchCancel()
 	if catchErr == nil && existingSched != nil {
-		i.scheduleExists[curEpoch] = true
-		i.leaderlogMu.Unlock()
-		return
+		nonceCtx, nonceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		currentNonce, nonceErr := i.store.GetFinalNonce(nonceCtx, curEpoch)
+		nonceCancel()
+		if nonceErr != nil || currentNonce == nil || hex.EncodeToString(currentNonce) == existingSched.EpochNonce {
+			i.scheduleExists[curEpoch] = true
+			i.leaderlogMu.Unlock()
+			return
+		}
+		log.Printf("[leaderlog] epoch %d: catch-up schedule stale (nonce changed) — recomputing", curEpoch)
 	}
 	i.leaderlogCalcing[curEpoch] = true
 	i.leaderlogMu.Unlock()

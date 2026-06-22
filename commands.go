@@ -438,12 +438,19 @@ func (i *Indexer) computeAndReplyLeaderlog(chat *telebot.Chat, targetEpoch int) 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	// Check DB first
+	// Check DB first — but verify the stored nonce still matches epoch_nonces
 	stored, err := i.store.GetLeaderSchedule(ctx, targetEpoch)
 	if err == nil && stored != nil {
-		msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
-		i.bot.Send(chat, msg)
-		return
+		currentNonce, nonceErr := i.store.GetFinalNonce(ctx, targetEpoch)
+		nonceStale := nonceErr == nil && currentNonce != nil &&
+			hex.EncodeToString(currentNonce) != stored.EpochNonce
+		if !nonceStale {
+			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
+			i.bot.Send(chat, msg)
+			return
+		}
+		log.Printf("[leaderlog] epoch %d: stored nonce %s stale (current %s) — recomputing",
+			targetEpoch, stored.EpochNonce[:8], hex.EncodeToString(currentNonce)[:8])
 	}
 
 	// Calculate live — send progress message
