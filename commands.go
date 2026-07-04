@@ -438,19 +438,29 @@ func (i *Indexer) computeAndReplyLeaderlog(chat *telebot.Chat, targetEpoch int) 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	// Check DB first — but verify the stored nonce still matches epoch_nonces
+	// Check DB first — only return the cached schedule when the stored nonce is
+	// verified to match the current epoch nonce. If we cannot fetch the nonce
+	// (error or nil) we cannot confirm freshness, so fall through and recompute.
 	stored, err := i.store.GetLeaderSchedule(ctx, targetEpoch)
 	if err == nil && stored != nil {
 		currentNonce, nonceErr := i.store.GetFinalNonce(ctx, targetEpoch)
-		nonceStale := nonceErr == nil && currentNonce != nil &&
-			hex.EncodeToString(currentNonce) != stored.EpochNonce
-		if !nonceStale {
-			msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
-			i.bot.Send(chat, msg)
-			return
+		if nonceErr == nil && currentNonce != nil {
+			if hex.EncodeToString(currentNonce) == stored.EpochNonce {
+				msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
+				i.bot.Send(chat, msg)
+				return
+			}
+			storedTrunc := stored.EpochNonce
+			if len(storedTrunc) > 16 {
+				storedTrunc = storedTrunc[:16]
+			}
+			curTrunc := hex.EncodeToString(currentNonce)
+			if len(curTrunc) > 16 {
+				curTrunc = curTrunc[:16]
+			}
+			log.Printf("[leaderlog] epoch %d: stored nonce %s… stale (current %s…) — recomputing",
+				targetEpoch, storedTrunc, curTrunc)
 		}
-		log.Printf("[leaderlog] epoch %d: stored nonce %s stale (current %s) — recomputing",
-			targetEpoch, stored.EpochNonce[:8], hex.EncodeToString(currentNonce)[:8])
 	}
 
 	// Calculate live — send progress message

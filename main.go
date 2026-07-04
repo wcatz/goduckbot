@@ -1515,7 +1515,10 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 			i.leaderlogMu.Unlock()
 			return
 		}
-		// Check DB once per epoch (with timeout), then cache the result
+		// Check DB once per epoch (with timeout), then cache the result.
+		// Only set scheduleExists when the nonce is verified to match — if
+		// GetFinalNonce errors or returns nil we cannot confirm freshness, so
+		// skip caching and retry on the next block.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		existing, err := i.store.GetLeaderSchedule(ctx, nextEpoch)
 		cancel()
@@ -1523,12 +1526,18 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 			nonceCtx, nonceCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			currentNonce, nonceErr := i.store.GetFinalNonce(nonceCtx, nextEpoch)
 			nonceCancel()
-			if nonceErr != nil || currentNonce == nil || hex.EncodeToString(currentNonce) == existing.EpochNonce {
-				i.scheduleExists[nextEpoch] = true
+			if nonceErr == nil && currentNonce != nil {
+				if hex.EncodeToString(currentNonce) == existing.EpochNonce {
+					i.scheduleExists[nextEpoch] = true
+					i.leaderlogMu.Unlock()
+					return
+				}
+				log.Printf("[leaderlog] epoch %d: advance schedule stale (nonce changed) — recomputing", nextEpoch)
+			} else {
+				// Nonce unavailable — don't cache scheduleExists, retry next block
 				i.leaderlogMu.Unlock()
 				return
 			}
-			log.Printf("[leaderlog] epoch %d: advance schedule stale (nonce changed) — recomputing", nextEpoch)
 		}
 		// Cooldown: don't retry for 15 minutes after a failed attempt
 		if failedAt, ok := i.leaderlogFailed[nextEpoch]; ok && time.Since(failedAt) < 15*time.Minute {
@@ -1583,12 +1592,18 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		nonceCtx, nonceCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		currentNonce, nonceErr := i.store.GetFinalNonce(nonceCtx, curEpoch)
 		nonceCancel()
-		if nonceErr != nil || currentNonce == nil || hex.EncodeToString(currentNonce) == existingSched.EpochNonce {
-			i.scheduleExists[curEpoch] = true
+		if nonceErr == nil && currentNonce != nil {
+			if hex.EncodeToString(currentNonce) == existingSched.EpochNonce {
+				i.scheduleExists[curEpoch] = true
+				i.leaderlogMu.Unlock()
+				return
+			}
+			log.Printf("[leaderlog] epoch %d: catch-up schedule stale (nonce changed) — recomputing", curEpoch)
+		} else {
+			// Nonce unavailable — don't cache scheduleExists, retry next block
 			i.leaderlogMu.Unlock()
 			return
 		}
-		log.Printf("[leaderlog] epoch %d: catch-up schedule stale (nonce changed) — recomputing", curEpoch)
 	}
 	i.leaderlogCalcing[curEpoch] = true
 	i.leaderlogMu.Unlock()
