@@ -775,8 +775,21 @@ func (i *Indexer) startAdderPipeline() error {
 				if i.mode == "full" {
 					fCtx, fCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					if fenceSlot, fErr := i.store.GetLastSyncedSlot(fCtx); fErr == nil && fenceSlot > 0 {
-						atomic.StoreUint64(&i.replayFenceSlot, fenceSlot)
-						log.Printf("Replay fence set at slot %d (replayed blocks suppressed)", fenceSlot)
+						// Monotonic: only advance the fence, never lower it. A rollback
+						// can drop the DB tip below a previously-notified pool block slot,
+						// causing GetLastSyncedSlot to return a value lower than the last
+						// fence. If we applied that lower value, the pool block would bypass
+						// the fence on replay and fire a duplicate notification.
+						for {
+							current := atomic.LoadUint64(&i.replayFenceSlot)
+							if fenceSlot <= current {
+								break
+							}
+							if atomic.CompareAndSwapUint64(&i.replayFenceSlot, current, fenceSlot) {
+								log.Printf("Replay fence set at slot %d (replayed blocks suppressed)", fenceSlot)
+								break
+							}
+						}
 					}
 					fCancel()
 				}
@@ -959,7 +972,10 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 
 	// Calculate interval using slot number difference (1 slot = 1 second in Shelley+)
 	currentSlot := blockEvent.Context.SlotNumber
-	if prevSlotNumber == 0 {
+	if prevSlotNumber == 0 || currentSlot <= prevSlotNumber {
+		// prevSlotNumber == 0: first block ever seen.
+		// currentSlot <= prevSlotNumber: replayed block after a rollback; subtraction
+		// would underflow the uint64 and produce a garbage interval string.
 		timeDiffString = "first"
 	} else {
 		slotDiff := currentSlot - prevSlotNumber
