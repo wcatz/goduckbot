@@ -933,12 +933,30 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 	if evt.Type == "input.rollback" {
 		if rb, ok := evt.Payload.(event.RollbackEvent); ok {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
 			n, err := i.store.DeleteBlocksAfterSlot(ctx, rb.SlotNumber)
+			cancel()
 			if err != nil {
 				log.Printf("rollback: failed to delete blocks after slot %d: %v", rb.SlotNumber, err)
 			} else if n > 0 {
 				log.Printf("rollback to slot %d: removed %d forked blocks from DB", rb.SlotNumber, n)
+			}
+
+			// The removed blocks may have included some of this pool's own minted
+			// blocks (forked out), which would leave epochBlocks overcounting
+			// relative to the post-rollback chain. The blocks table has no issuer
+			// column to recompute this locally, so resync from Koios instead —
+			// the same source of truth used for lite-mode reconnect resync below.
+			if rollbackEpoch := SlotToEpoch(rb.SlotNumber, i.networkMagic); rollbackEpoch != i.epoch {
+				i.epoch = rollbackEpoch
+			}
+			if i.koios != nil {
+				koiosCtx, koiosCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				epoch := koios.EpochNo(i.epoch)
+				if eb, ebErr := i.koios.GetPoolBlocks(koiosCtx, koios.PoolID(i.bech32PoolId), &epoch, nil); ebErr == nil && eb.Data != nil {
+					i.epochBlocks = len(eb.Data)
+					log.Printf("Resynced epoch block count from Koios after rollback: %d", i.epochBlocks)
+				}
+				koiosCancel()
 			}
 		}
 		return nil
