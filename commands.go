@@ -446,20 +446,40 @@ func (i *Indexer) computeAndReplyLeaderlog(chat *telebot.Chat, targetEpoch int) 
 		currentNonce, nonceErr := i.store.GetFinalNonce(ctx, targetEpoch)
 		if nonceErr == nil && currentNonce != nil {
 			if hex.EncodeToString(currentNonce) == stored.EpochNonce {
-				msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
-				i.bot.Send(chat, msg)
-				return
+				// Nonce match alone isn't enough (#132): a schedule can be stored
+				// with wrong stake (e.g. the #131 Koios-fallback bug substituting a
+				// neighboring epoch's stake) while still carrying the correct nonce.
+				// Re-verify against a fresh stake lookup before serving the cache.
+				// If the lookup itself fails, serve the cache anyway — a transient
+				// Koios error shouldn't force a 15-minute VRF recompute for an
+				// otherwise nonce-verified schedule.
+				poolStake, totalStake, stakeErr := i.queryStakeForLeaderlog(ctx, targetEpoch)
+				if stakeErr != nil {
+					log.Printf("[leaderlog] epoch %d: stake re-verification failed (%v), serving cached schedule",
+						targetEpoch, stakeErr)
+					msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
+					i.bot.Send(chat, msg)
+					return
+				}
+				if poolStake == stored.PoolStake && totalStake == stored.TotalStake {
+					msg := FormatScheduleForTelegram(stored, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
+					i.bot.Send(chat, msg)
+					return
+				}
+				log.Printf("[leaderlog] epoch %d: stored stake (pool=%d total=%d) stale vs fresh (pool=%d total=%d) — recomputing",
+					targetEpoch, stored.PoolStake, stored.TotalStake, poolStake, totalStake)
+			} else {
+				storedTrunc := stored.EpochNonce
+				if len(storedTrunc) > 16 {
+					storedTrunc = storedTrunc[:16]
+				}
+				curTrunc := hex.EncodeToString(currentNonce)
+				if len(curTrunc) > 16 {
+					curTrunc = curTrunc[:16]
+				}
+				log.Printf("[leaderlog] epoch %d: stored nonce %s… stale (current %s…) — recomputing",
+					targetEpoch, storedTrunc, curTrunc)
 			}
-			storedTrunc := stored.EpochNonce
-			if len(storedTrunc) > 16 {
-				storedTrunc = storedTrunc[:16]
-			}
-			curTrunc := hex.EncodeToString(currentNonce)
-			if len(curTrunc) > 16 {
-				curTrunc = curTrunc[:16]
-			}
-			log.Printf("[leaderlog] epoch %d: stored nonce %s… stale (current %s…) — recomputing",
-				targetEpoch, storedTrunc, curTrunc)
 		}
 	}
 
