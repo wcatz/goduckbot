@@ -1676,25 +1676,17 @@ func (i *Indexer) queryStakeForLeaderlog(ctx context.Context, targetEpoch int) (
 		}
 	}
 
-	// Koios fallback: try target epoch first, then recent epochs
+	// Koios fallback: active stake is specific to targetEpoch, so no other
+	// epoch's data is a valid substitute (see #131) — only an exact match is used.
 	if i.koios != nil {
-		for _, tryEpoch := range []int{targetEpoch, curEpoch, curEpoch - 1, curEpoch - 2} {
-			epochNo := koios.EpochNo(tryEpoch)
-			poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
-			if histErr != nil || len(poolHist.Data) == 0 {
-				continue
-			}
-			poolStake = uint64(poolHist.Data[0].ActiveStake.IntPart())
+		epochNo := koios.EpochNo(targetEpoch)
+		poolHist, histErr := i.koios.GetPoolHistory(ctx, koios.PoolID(i.bech32PoolId), &epochNo, nil)
+		if histErr == nil && len(poolHist.Data) > 0 {
+			candidatePoolStake := uint64(poolHist.Data[0].ActiveStake.IntPart())
 			epochInfo, infoErr := i.koios.GetEpochInfo(ctx, &epochNo, nil)
-			if infoErr != nil || len(epochInfo.Data) == 0 {
-				poolStake = 0
-				continue
+			if infoErr == nil && len(epochInfo.Data) > 0 {
+				return candidatePoolStake, uint64(epochInfo.Data[0].ActiveStake.IntPart()), nil
 			}
-			totalStake = uint64(epochInfo.Data[0].ActiveStake.IntPart())
-			if tryEpoch != targetEpoch {
-				log.Printf("Using Koios stake fallback for epoch %d (from epoch %d)", targetEpoch, tryEpoch)
-			}
-			return poolStake, totalStake, nil
 		}
 	}
 
