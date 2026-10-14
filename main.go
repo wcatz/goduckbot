@@ -169,6 +169,10 @@ type Indexer struct {
 	historicalSyncDone  int32             // atomic: 0 = syncing, 1 = done (lite mode starts at 1)
 	replayFenceSlot     uint64            // atomic: slots <= this are replays on full-mode reconnect
 	leaderlogArmedAt    time.Time         // don't auto-trigger leaderlog before this time
+	// Per-block execution unit limits for mint notifications, cached per epoch
+	exUnitsEpoch  int
+	maxBlockSteps int64
+	maxBlockMem   int64
 }
 
 // isSynced returns true when historical sync is complete (or in lite mode).
@@ -969,8 +973,10 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 
 	// Extract VRF output before JSON marshal (Block field is json:"-")
 	var vrfOutput []byte
-	if i.leaderlogEnabled {
-		if be, ok := evt.Payload.(event.BlockEvent); ok && be.Block != nil {
+	var ledgerBlock ledger.Block
+	if be, ok := evt.Payload.(event.BlockEvent); ok && be.Block != nil {
+		ledgerBlock = be.Block
+		if i.leaderlogEnabled {
 			vrfOutput = extractVrfOutput(be.Block.Header())
 		}
 	}
@@ -1073,19 +1079,30 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				blockSizeKB, sizePercentage,
 				i.epochBlocks, i.totalBlocks)
 
-			msg := fmt.Sprintf(
-				"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
-					"%s\n"+"\U0001F4A5 New Block!\n\n"+
-					"Tx Count: %d\n"+
-					"Block Size: %.2f KB\n"+
-					"%.2f%% Full\n"+
-					"Interval: %s\n\n"+
-					"Epoch Blocks: %d\n"+
-					"Lifetime Blocks: %d\n\n"+
-					"Cexplorer: "+cexplorerLink+"%s",
-				i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
-				timeDiffString, i.epochBlocks, i.totalBlocks,
-				blockEvent.Payload.BlockHash)
+			notif := mintNotification{
+				PoolName:       i.poolName,
+				TxCount:        blockEvent.Payload.TransactionCount,
+				SizePercentage: sizePercentage,
+				Interval:       timeDiffString,
+				EpochBlocks:    i.epochBlocks,
+				TotalBlocks:    i.totalBlocks,
+			}
+			if ledgerBlock != nil {
+				notif.HasBlock = true
+				notif.ScriptTxs, notif.Steps, notif.Mem = blockScriptUsage(ledgerBlock)
+				if notif.ScriptTxs > 0 {
+					notif.MaxSteps, notif.MaxMem = i.getMaxBlockExUnits(blockEpoch)
+				}
+				notif.ProtoMinor, notif.HasProto = headerProtoMinor(ledgerBlock.Header())
+			}
+			pooltoolURL := pooltoolBlockURL(i.networkMagic, blockEvent.Context.BlockNumber)
+
+			tgNotif := notif
+			if pooltoolURL != "" {
+				tgNotif.Links = append(tgNotif.Links, "Pooltool: "+pooltoolURL)
+			}
+			tgNotif.Links = append(tgNotif.Links, "Cexplorer: "+cexplorerLink+blockEvent.Payload.BlockHash)
+			msg := formatMintMessage(tgNotif)
 
 			// Get duck media for notifications
 			mediaURL, isGif, mediaErr := i.getDuckMedia()
@@ -1124,19 +1141,13 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				}
 			}
 
-			// Send tweet if Twitter is enabled (same format as Telegram minus links)
+			// Send tweet if Twitter is enabled (same format as Telegram, minus the
+			// pool name line, with a single AdaStat link to stay under 280 chars)
 			if i.twitterEnabled {
-				tweetMsg := fmt.Sprintf(
-					"Quack!(attention) \U0001F986\nduckBot notification!\n\n"+
-						"%s\n"+"\U0001F4A5 New Block!\n\n"+
-						"Tx Count: %d\n"+
-						"Block Size: %.2f KB\n"+
-						"%.2f%% Full\n"+
-						"Interval: %s\n\n"+
-						"Epoch Blocks: %d\n"+
-						"Lifetime Blocks: %d",
-					i.poolName, blockEvent.Payload.TransactionCount, blockSizeKB, sizePercentage,
-					timeDiffString, i.epochBlocks, i.totalBlocks)
+				xNotif := notif
+				xNotif.PoolName = ""
+				xNotif.Links = []string{adastatBlockURL(i.networkMagic, blockEvent.Payload.BlockHash)}
+				tweetMsg := formatMintMessage(xNotif)
 
 				if err := i.sendTweet(tweetMsg, mediaURL, isGif); err != nil {
 					log.Printf("failed to send tweet: %s", err)
