@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -55,6 +58,8 @@ func TestFormatMintMessageTweetFits(t *testing.T) {
 	n.Interval = "120m59s"
 	n.EpochBlocks = 999
 	n.TotalBlocks = 9_999_999
+	n.HasNodeBlocks = true
+	n.NodeBlocks = 9_999_999
 	n.Links = []string{adastatBlockURL(MainnetNetworkMagic, strings.Repeat("f", 64))}
 	msg := formatMintMessage(n)
 	if l := xWeightedLen(msg); l > 280 {
@@ -85,6 +90,72 @@ func TestFormatMintMessageContent(t *testing.T) {
 	}
 	if !utf8.ValidString(msg) {
 		t.Error("invalid UTF-8")
+	}
+}
+
+func TestFormatMintMessageNodeBlocks(t *testing.T) {
+	n := sampleMint()
+	n.HasNodeBlocks = true
+	n.NodeBlocks = 43
+	if msg := formatMintMessage(n); !strings.Contains(msg, "Node: Dingo(43)\n") {
+		t.Errorf("missing Dingo count in:\n%s", msg)
+	}
+	n.ProtoMinor = 0
+	n.NodeBlocks = 5348
+	if msg := formatMintMessage(n); !strings.Contains(msg, "Node: Haskell(5348)\n") {
+		t.Errorf("missing Haskell count in:\n%s", msg)
+	}
+}
+
+func TestNodeBlockCount(t *testing.T) {
+	if got := nodeBlockCount(dingoProtoMinor, 5391, 43); got != 43 {
+		t.Errorf("dingo: got %d, want 43", got)
+	}
+	if got := nodeBlockCount(0, 5391, 43); got != 5348 {
+		t.Errorf("haskell: got %d, want 5348", got)
+	}
+	if got := nodeBlockCount(0, 10, 43); got != 0 {
+		t.Errorf("haskell underflow: got %d, want 0", got)
+	}
+}
+
+func TestFetchPoolBlockCountByProtoMinor(t *testing.T) {
+	var gotQuery, gotPrefer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery, gotPrefer = r.URL.RawQuery, r.Header.Get("Prefer")
+		w.Header().Set("Content-Range", "0-0/43")
+		w.Write([]byte(`[{"block_height":1}]`))
+	}))
+	defer srv.Close()
+
+	n, err := fetchPoolBlockCountByProtoMinor(context.Background(), srv.URL, "pool1abc", dingoProtoMinor)
+	if err != nil || n != 43 {
+		t.Fatalf("got %d, %v; want 43", n, err)
+	}
+	if gotPrefer != "count=exact" {
+		t.Errorf("Prefer header = %q", gotPrefer)
+	}
+	for _, want := range []string{"pool=eq.pool1abc", "proto_minor=eq.69"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Errorf("query %q missing %q", gotQuery, want)
+		}
+	}
+
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "*/0")
+		w.Write([]byte(`[]`))
+	}))
+	defer empty.Close()
+	if n, err := fetchPoolBlockCountByProtoMinor(context.Background(), empty.URL, "pool1abc", dingoProtoMinor); err != nil || n != 0 {
+		t.Errorf("empty: got %d, %v; want 0", n, err)
+	}
+
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer bad.Close()
+	if _, err := fetchPoolBlockCountByProtoMinor(context.Background(), bad.URL, "pool1abc", dingoProtoMinor); err == nil {
+		t.Error("want error on 429")
 	}
 }
 
