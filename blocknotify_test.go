@@ -88,15 +88,6 @@ func TestFormatMintMessageContent(t *testing.T) {
 	}
 }
 
-func TestPooltoolBlockURL(t *testing.T) {
-	if got := pooltoolBlockURL(MainnetNetworkMagic, 14065812); got != "https://pooltool.io/realtime/14065812" {
-		t.Errorf("mainnet: got %q", got)
-	}
-	if got := pooltoolBlockURL(PreprodNetworkMagic, 1); got != "" {
-		t.Errorf("preprod: got %q, want empty", got)
-	}
-}
-
 func TestAdastatBlockURL(t *testing.T) {
 	h := strings.Repeat("a", 64)
 	cases := map[int]string{

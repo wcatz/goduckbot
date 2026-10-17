@@ -1095,12 +1095,7 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				}
 				notif.ProtoMinor, notif.HasProto = headerProtoMinor(ledgerBlock.Header())
 			}
-			pooltoolURL := pooltoolBlockURL(i.networkMagic, blockEvent.Context.BlockNumber)
-
 			tgNotif := notif
-			if pooltoolURL != "" {
-				tgNotif.Links = append(tgNotif.Links, "Pooltool: "+pooltoolURL)
-			}
 			tgNotif.Links = append(tgNotif.Links, "Cexplorer: "+cexplorerLink+blockEvent.Payload.BlockHash)
 			msg := formatMintMessage(tgNotif)
 
