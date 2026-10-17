@@ -119,15 +119,6 @@ func blockScriptUsage(block ledger.Block) (scriptTxs int, steps, mem int64) {
 	return scriptTxs, steps, mem
 }
 
-// pooltoolBlockURL returns the pooltool realtime link for a block, or "" off
-// mainnet (pooltool only tracks mainnet).
-func pooltoolBlockURL(networkMagic int, blockNumber uint64) string {
-	if networkMagic != MainnetNetworkMagic {
-		return ""
-	}
-	return fmt.Sprintf("https://pooltool.io/realtime/%d", blockNumber)
-}
-
 // adastatBlockURL returns the AdaStat explorer link for a block hash.
 func adastatBlockURL(networkMagic int, blockHash string) string {
 	switch networkMagic {
