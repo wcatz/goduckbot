@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +38,10 @@ type mintNotification struct {
 	// Forging node, from the header protocol version.
 	HasProto   bool
 	ProtoMinor uint64
-	Links      []string // appended at the end, one per line
+	// Lifetime blocks forged by that node implementation; omitted when unknown.
+	HasNodeBlocks bool
+	NodeBlocks    uint64
+	Links         []string // appended at the end, one per line
 }
 
 // formatMintMessage renders a minted-block notification for Telegram or X.
@@ -47,7 +53,11 @@ func formatMintMessage(n mintNotification) string {
 	}
 	b.WriteString("\U0001F4A5 New Block!\n")
 	if n.HasProto {
-		fmt.Fprintf(&b, "Node: %s\n", nodeImplementation(n.ProtoMinor))
+		if n.HasNodeBlocks {
+			fmt.Fprintf(&b, "Node: %s(%d)\n", nodeImplementation(n.ProtoMinor), n.NodeBlocks)
+		} else {
+			fmt.Fprintf(&b, "Node: %s\n", nodeImplementation(n.ProtoMinor))
+		}
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "Tx Count: %d\nBlock Size: %.2f%%\nInterval: %s\n\n",
@@ -84,6 +94,45 @@ func nodeImplementation(protoMinor uint64) string {
 		return "Dingo"
 	}
 	return "Haskell"
+}
+
+// nodeBlockCount returns the lifetime blocks forged by the node implementation
+// identified by protoMinor. Haskell is everything not forged by Dingo.
+func nodeBlockCount(protoMinor, totalBlocks, dingoBlocks uint64) uint64 {
+	if protoMinor == dingoProtoMinor {
+		return dingoBlocks
+	}
+	if dingoBlocks > totalBlocks {
+		return 0
+	}
+	return totalBlocks - dingoBlocks
+}
+
+// fetchPoolBlockCountByProtoMinor returns how many blocks a pool has forged
+// with the given header protocol minor version, using Koios' exact row count
+// (Content-Range) so only one row is transferred.
+func fetchPoolBlockCountByProtoMinor(ctx context.Context, baseURL, poolBech32 string, protoMinor uint64) (uint64, error) {
+	u := fmt.Sprintf("%s/blocks?pool=eq.%s&proto_minor=eq.%d&select=block_height&limit=1",
+		baseURL, url.QueryEscape(poolBech32), protoMinor)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Prefer", "count=exact")
+	resp, err := koiosHTTPClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return 0, fmt.Errorf("koios returned %d", resp.StatusCode)
+	}
+	cr := resp.Header.Get("Content-Range")
+	slash := strings.LastIndex(cr, "/")
+	if slash < 0 {
+		return 0, fmt.Errorf("missing count in Content-Range %q", cr)
+	}
+	return strconv.ParseUint(cr[slash+1:], 10, 64)
 }
 
 // headerProtoMinor returns the protocol minor version from a Babbage/Conway header.
