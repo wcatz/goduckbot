@@ -166,6 +166,8 @@ type Indexer struct {
 	leaderlogCalcing    map[int]bool      // epochs currently being calculated
 	leaderlogFailed     map[int]time.Time // cooldown: epoch -> last failure time
 	scheduleExists      map[int]bool      // cached: epoch -> schedule already in DB
+	nonceVerified       map[int]bool      // epoch -> schedule nonce confirmed against Koios
+	nonceVerifyAt       map[int]time.Time // epoch -> last Koios nonce check
 	syncer              *ChainSyncer      // nil in lite mode
 	lastBlockTime       int64             // atomic: unix timestamp of last block received
 	historicalSyncDone  int32             // atomic: 0 = syncing, 1 = done (lite mode starts at 1)
@@ -466,6 +468,8 @@ func (i *Indexer) Start() error {
 		i.leaderlogCalcing = make(map[int]bool)
 		i.leaderlogFailed = make(map[int]time.Time)
 		i.scheduleExists = make(map[int]bool)
+		i.nonceVerified = make(map[int]bool)
+		i.nonceVerifyAt = make(map[int]time.Time)
 		i.leaderlogArmedAt = time.Now().Add(5 * time.Minute) // don't auto-post on startup
 		log.Println("Nonce tracker initialized")
 
@@ -955,6 +959,16 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 				log.Printf("rollback: failed to delete blocks after slot %d: %v", rb.SlotNumber, err)
 			} else if n > 0 {
 				log.Printf("rollback to slot %d: removed %d forked blocks from DB", rb.SlotNumber, n)
+
+				// The nonce tracker evolved the removed blocks; rebuild it from
+				// the blocks that remain so they stop counting.
+				if i.nonceTracker != nil {
+					rewindCtx, rewindCancel := context.WithTimeout(context.Background(), 30*time.Second)
+					if rewindErr := i.nonceTracker.RewindToSlot(rewindCtx, rb.SlotNumber); rewindErr != nil {
+						log.Printf("rollback: failed to rewind nonce to slot %d: %v", rb.SlotNumber, rewindErr)
+					}
+					rewindCancel()
+				}
 
 				// The removed blocks may have included some of this pool's own minted
 				// blocks (forked out), which would leave epochBlocks overcounting
@@ -1557,6 +1571,7 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		}
 		// Skip if schedule already cached as existing (no DB hit per block)
 		if i.scheduleExists[nextEpoch] {
+			i.maybeVerifyScheduleNonceLocked(nextEpoch)
 			i.leaderlogMu.Unlock()
 			return
 		}
@@ -1623,6 +1638,9 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 	curEpoch := i.epoch
 	i.leaderlogMu.Lock()
 	if i.leaderlogCalcing[curEpoch] || i.scheduleExists[curEpoch] {
+		if i.scheduleExists[curEpoch] {
+			i.maybeVerifyScheduleNonceLocked(curEpoch)
+		}
 		i.leaderlogMu.Unlock()
 		return
 	}
@@ -1675,6 +1693,70 @@ func (i *Indexer) checkLeaderlogTrigger(slot uint64) {
 		}
 		i.leaderlogMu.Unlock()
 	}()
+}
+
+// scheduleNonceVerifyInterval is how often an unconfirmed schedule's nonce is
+// checked against Koios.
+const scheduleNonceVerifyInterval = 10 * time.Minute
+
+// maybeVerifyScheduleNonceLocked starts a Koios check of epoch's schedule
+// nonce unless it is already confirmed or was checked recently. Callers hold
+// i.leaderlogMu.
+func (i *Indexer) maybeVerifyScheduleNonceLocked(epoch int) {
+	if i.nonceTracker == nil || i.nonceVerified[epoch] {
+		return
+	}
+	if i.nonceVerifyAt == nil {
+		i.nonceVerifyAt = make(map[int]time.Time)
+	}
+	if time.Since(i.nonceVerifyAt[epoch]) < scheduleNonceVerifyInterval {
+		return
+	}
+	i.nonceVerifyAt[epoch] = time.Now()
+	go i.verifyScheduleNonce(epoch)
+}
+
+// verifyScheduleNonce checks the nonce a stored schedule was computed from
+// against Koios. The next epoch's schedule is computed before Koios publishes
+// that epoch's nonce, from this process's own evolving-nonce state, and a gap
+// in the local block history makes that nonce wrong. Once Koios publishes, its
+// nonce wins: a mismatch replaces the stored nonce and marks the schedule
+// stale, and checkLeaderlogTrigger then recomputes and reposts it. Until
+// Koios publishes, nothing changes and the check repeats later.
+func (i *Indexer) verifyScheduleNonce(epoch int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	koiosNonce, err := i.nonceTracker.fetchNonceFromKoios(ctx, epoch)
+	if err != nil {
+		return
+	}
+	stored, err := i.store.GetFinalNonce(ctx, epoch)
+	if err != nil {
+		log.Printf("[leaderlog] epoch %d: reading stored nonce for Koios check: %v", epoch, err)
+		return
+	}
+
+	corrected := false
+	if !bytes.Equal(stored, koiosNonce) {
+		log.Printf("[leaderlog] epoch %d: stored nonce %x disagrees with Koios %x — using Koios and reposting the schedule",
+			epoch, stored, koiosNonce)
+		if err := i.store.SetFinalNonce(ctx, epoch, koiosNonce, "koios"); err != nil {
+			log.Printf("[leaderlog] epoch %d: storing Koios nonce: %v", epoch, err)
+			return
+		}
+		corrected = true
+	}
+
+	i.leaderlogMu.Lock()
+	defer i.leaderlogMu.Unlock()
+	if i.nonceVerified == nil {
+		i.nonceVerified = make(map[int]bool)
+	}
+	i.nonceVerified[epoch] = true
+	if corrected {
+		delete(i.scheduleExists, epoch)
+	}
 }
 
 // queryStakeForLeaderlog retrieves pool and total stake for the given target epoch.
@@ -1782,6 +1864,10 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 	log.Printf("Epoch %d: %d slots assigned (expected %.2f)",
 		epoch, len(schedule.AssignedSlots), schedule.IdealSlots)
 
+	// A schedule already posted for this epoch is being replaced because its
+	// nonce changed; say so, so the earlier post is not mistaken for current.
+	reposting := i.store.IsSchedulePosted(ctx, epoch)
+
 	// Store in database
 	if err := i.store.InsertLeaderSchedule(ctx, schedule); err != nil {
 		log.Printf("Failed to store leader schedule: %v", err)
@@ -1790,6 +1876,9 @@ func (i *Indexer) calculateAndPostLeaderlog(epoch int) bool {
 	// Post to Telegram if enabled
 	if i.telegramEnabled && i.bot != nil {
 		msg := FormatScheduleForTelegram(schedule, i.poolName, i.leaderlogTZ, i.leaderlogTimeFormat)
+		if reposting {
+			msg = fmt.Sprintf("⚠️ Corrected leader schedule for epoch %d (epoch nonce updated); it replaces the earlier post.\n\n", epoch) + msg
+		}
 
 		channelID, err := strconv.ParseInt(i.telegramChannel, 10, 64)
 		if err != nil {
