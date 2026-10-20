@@ -463,7 +463,7 @@ func (s *PgStore) GetBlockCountForEpoch(ctx context.Context, epoch int) (int, er
 
 func (s *PgStore) GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBlock, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT epoch, vrf_output FROM blocks WHERE epoch = $1 ORDER BY slot`, epoch)
+		`SELECT slot, epoch, vrf_output FROM blocks WHERE epoch = $1 ORDER BY slot`, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -472,7 +472,7 @@ func (s *PgStore) GetVrfOutputsForEpoch(ctx context.Context, epoch int) ([]VrfBl
 	var blocks []VrfBlock
 	for rows.Next() {
 		var b VrfBlock
-		if err := rows.Scan(&b.Epoch, &b.VrfOutput); err != nil {
+		if err := rows.Scan(&b.Slot, &b.Epoch, &b.VrfOutput); err != nil {
 			return nil, err
 		}
 		blocks = append(blocks, b)

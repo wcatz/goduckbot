@@ -90,10 +90,15 @@ func NewNonceTracker(store Store, koiosClient *koios.Client, epoch, networkMagic
 	defer cancel()
 
 	nonce, blockCount, err := store.GetEvolvingNonce(ctx, epoch)
-	if err == nil && nonce != nil {
+	if err == nil && nonce != nil && blockCount > 0 {
 		nt.evolvingNonce = nonce
 		nt.blockCount = blockCount
 		log.Printf("Restored evolving nonce for epoch %d (block count: %d)", epoch, blockCount)
+	} else if prev, _, prevErr := store.GetEvolvingNonce(ctx, epoch-1); prevErr == nil && prev != nil {
+		// No block of this epoch counted yet: the evolving nonce rolls on
+		// from the previous epoch (see the placeholder note in ProcessBlock).
+		nt.evolvingNonce = prev
+		log.Printf("Continuing evolving nonce for epoch %d from epoch %d", epoch, epoch-1)
 	} else {
 		nt.evolvingNonce = initialNonce(fullMode, networkMagic)
 		log.Printf("Starting fresh nonce tracking for epoch %d (full=%v)", epoch, fullMode)
@@ -173,11 +178,15 @@ func (nt *NonceTracker) ProcessBlock(slot uint64, epoch int, blockHash string, v
 		nt.blockCount = 0
 		nt.candidateFroze = false
 
-		// Try to restore evolving nonce from DB (e.g., after restart mid-epoch)
+		// Try to restore evolving nonce from DB (e.g., after restart mid-epoch).
+		// A row with no blocks counted holds no evolving state: SetFinalNonce
+		// creates it, before the epoch starts, with the final nonce in
+		// evolving_nonce. Restoring that would restart the evolving nonce from
+		// the epoch nonce instead of rolling it across the boundary.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		nonce, bc, err := nt.store.GetEvolvingNonce(ctx, epoch)
 		cancel()
-		if err == nil && nonce != nil {
+		if err == nil && nonce != nil && bc > 0 {
 			nt.evolvingNonce = nonce
 			nt.blockCount = bc
 			log.Printf("Restored evolving nonce for epoch %d from DB (block count: %d)", epoch, bc)
@@ -365,6 +374,51 @@ func (nt *NonceTracker) RecomputeCurrentEpochNonce(ctx context.Context, epoch in
 	nt.mu.Lock()
 	defer nt.mu.Unlock()
 
+	if err := nt.restoreEpochFromDB(ctx, epoch); err != nil {
+		return err
+	}
+	log.Printf("RecomputeCurrentEpochNonce: epoch %d recomputed from %d blocks (raw VRF)", epoch, nt.blockCount)
+	return nil
+}
+
+// RewindToSlot rebuilds the nonce state after a rollback to slot, once the
+// blocks after slot have been deleted. ProcessBlock evolves the nonce only
+// for blocks it inserts, so without a rewind a forked block's contribution
+// stays in the evolving nonce, and every block re-applied after the rollback
+// (inserted again because the rollback deleted it) is evolved twice.
+func (nt *NonceTracker) RewindToSlot(ctx context.Context, slot uint64) error {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+
+	epoch := SlotToEpoch(slot, nt.networkMagic)
+	rolledBackFrom := nt.currentEpoch
+	if err := nt.restoreEpochFromDB(ctx, epoch); err != nil {
+		return err
+	}
+	// The rollback deleted every block of the epochs after epoch. Reset their
+	// rows to hold no blocks, so crossing into them again rolls the nonce on
+	// from epoch instead of restoring the rolled-back state (see ProcessBlock).
+	for later := epoch + 1; later <= rolledBackFrom; later++ {
+		if err := nt.store.UpsertEvolvingNonce(ctx, later, nt.evolvingNonce, 0); err != nil {
+			return fmt.Errorf("resetting evolving nonce for epoch %d: %w", later, err)
+		}
+		if err := nt.store.DeleteCandidateNonce(ctx, later); err != nil {
+			return fmt.Errorf("resetting candidate nonce for epoch %d: %w", later, err)
+		}
+	}
+	log.Printf("Rewound nonce to slot %d: epoch %d, %d blocks, candidate frozen %v",
+		slot, epoch, nt.blockCount, nt.candidateFroze)
+	return nil
+}
+
+// restoreEpochFromDB recomputes epoch's evolving nonce and candidate nonce
+// from the previous epoch's evolving nonce and the blocks stored for epoch,
+// persists both, and loads them as the tracker's state. The candidate is the
+// evolving nonce just before the first stored block at or after the stability
+// slot; while no stored block has reached the stability slot there is none,
+// and the stored candidate is removed so it freezes again as blocks arrive.
+// Callers hold nt.mu.
+func (nt *NonceTracker) restoreEpochFromDB(ctx context.Context, epoch int) error {
 	// Start from previous epoch's final evolving nonce state.
 	// The evolving nonce rolls across epoch boundaries (no reset).
 	var etaV []byte
@@ -376,7 +430,7 @@ func (nt *NonceTracker) RecomputeCurrentEpochNonce(ctx context.Context, epoch in
 	}
 	if etaV == nil {
 		etaV = initialNonce(nt.fullMode, nt.networkMagic)
-		log.Printf("RecomputeCurrentEpochNonce: no previous epoch nonce, using initial seed")
+		log.Printf("restoreEpochFromDB: no previous epoch nonce, using initial seed")
 	}
 
 	// Stream raw VRF outputs for this epoch's blocks and recompute nonce values.
@@ -385,24 +439,33 @@ func (nt *NonceTracker) RecomputeCurrentEpochNonce(ctx context.Context, epoch in
 	if err != nil {
 		return fmt.Errorf("querying blocks for epoch %d: %w", epoch, err)
 	}
-
+	stabilitySlot := GetEpochStartSlot(epoch, nt.networkMagic) +
+		StabilityWindowSlotsForEpoch(epoch, nt.networkMagic)
+	var candidate []byte
 	for _, b := range vrfBlocks {
+		if candidate == nil && b.Slot >= stabilitySlot {
+			candidate = etaV
+		}
 		nonceValue := vrfNonceValueForEpoch(b.VrfOutput, b.Epoch, nt.networkMagic)
 		etaV = evolveNonce(etaV, nonceValue)
 	}
 
-	// Persist corrected nonce
 	if err := nt.store.UpsertEvolvingNonce(ctx, epoch, etaV, len(vrfBlocks)); err != nil {
 		return fmt.Errorf("persisting recomputed nonce for epoch %d: %w", epoch, err)
 	}
+	if candidate != nil {
+		err = nt.store.SetCandidateNonce(ctx, epoch, candidate)
+	} else {
+		err = nt.store.DeleteCandidateNonce(ctx, epoch)
+	}
+	if err != nil {
+		return fmt.Errorf("persisting candidate nonce for epoch %d: %w", epoch, err)
+	}
 
-	// Update in-memory state
 	nt.evolvingNonce = etaV
 	nt.currentEpoch = epoch
 	nt.blockCount = len(vrfBlocks)
-	nt.candidateFroze = false
-
-	log.Printf("RecomputeCurrentEpochNonce: epoch %d recomputed from %d blocks (raw VRF)", epoch, len(vrfBlocks))
+	nt.candidateFroze = candidate != nil
 	return nil
 }
 
