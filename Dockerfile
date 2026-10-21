@@ -1,5 +1,5 @@
 # Stage 1: Build the Go binary
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 
 # Build arguments for version metadata
 ARG VERSION=dev
