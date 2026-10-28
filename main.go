@@ -172,6 +172,8 @@ type Indexer struct {
 	lastBlockTime       int64             // atomic: unix timestamp of last block received
 	historicalSyncDone  int32             // atomic: 0 = syncing, 1 = done (lite mode starts at 1)
 	replayFenceSlot     uint64            // atomic: slots <= this are replays on full-mode reconnect
+	liveTailSlot        uint64            // atomic: highest block slot the live tail has handled
+	liveTailRestart     chan struct{}     // full mode: restarts the live tail from the DB after historical sync
 	leaderlogArmedAt    time.Time         // don't auto-trigger leaderlog before this time
 	// Per-block execution unit limits for mint notifications, cached per epoch
 	exUnitsEpoch  int
@@ -589,9 +591,21 @@ func (i *Indexer) runChainTail() error {
 		}
 	}
 
+	// Fill blocks missing from earlier runs before anything else writes blocks,
+	// then rebuild the nonce state that rolled over them.
+	if fullMode && len(i.nodeAddresses) > 0 {
+		repairCtx, repairCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		if err := RepairBlockGaps(repairCtx, i.store, i.nonceTracker, koiosGapSource{i.networkMagic},
+			ntnHeaderFetcher(i.nodeAddresses[0], i.networkMagic), i.networkMagic); err != nil {
+			log.Printf("WARNING: block gap repair failed: %v", err)
+		}
+		repairCancel()
+	}
+
 	// Start adder pipeline immediately so block notifications work during historical sync.
 	// Nonce processing in handleEvent is gated by historicalSyncDone so the tracker isn't corrupted.
 	if fullMode && len(i.nodeAddresses) > 0 {
+		i.liveTailRestart = make(chan struct{}, 1)
 		go func() {
 			log.Println("Starting adder pipeline (notifications active during historical sync)...")
 			if err := i.startAdderPipeline(); err != nil {
@@ -696,6 +710,7 @@ func (i *Indexer) runChainTail() error {
 		<-writerDone // wait for DB writer to flush
 		atomic.StoreInt32(&i.historicalSyncDone, 1)
 		log.Println("Historical sync complete, transitioning to live tail...")
+		i.restartLiveTailFromDB()
 
 		// Run nonce backfill after sync so blocks table has data
 		go func() {
@@ -743,6 +758,27 @@ func (i *Indexer) runChainTail() error {
 
 	// Full mode: block forever (adder pipeline runs in its own goroutine)
 	select {}
+}
+
+// restartLiveTailFromDB replays, through the nonce tracker, the blocks the live
+// tail handled before historical sync finished. handleEvent skips nonce
+// processing until then, and historical sync stops within 120 slots of the
+// tip, so without the replay the blocks between the two are never stored.
+// The restart intersects from the DB tip (see startAdderPipeline); the replay
+// fence is raised to the live tail's highest slot first, because those blocks
+// were already announced.
+func (i *Indexer) restartLiveTailFromDB() {
+	seen := atomic.LoadUint64(&i.liveTailSlot)
+	for {
+		fence := atomic.LoadUint64(&i.replayFenceSlot)
+		if seen <= fence || atomic.CompareAndSwapUint64(&i.replayFenceSlot, fence, seen) {
+			break
+		}
+	}
+	select {
+	case i.liveTailRestart <- struct{}{}:
+	default:
+	}
 }
 
 // adderIntersectFromDB builds an intersect point from the last block in the DB,
@@ -899,12 +935,14 @@ func (i *Indexer) startAdderPipeline() error {
 				}
 			}()
 
-			// Block until pipeline error OR stall detected
+			// Block until pipeline error, stall, or a requested restart
 			select {
 			case pipelineErr := <-i.pipeline.ErrorChan():
 				log.Printf("Pipeline error: %s", pipelineErr)
 			case <-stallCh:
 				// Stall detector already logged
+			case <-i.liveTailRestart:
+				log.Println("Restarting live tail from the DB to replay blocks handled before historical sync finished")
 			}
 
 			// Signal stall detector to stop (no-op if it already closed stallCh)
@@ -1040,6 +1078,12 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 		}
 	}
 	prevSlotNumber = currentSlot
+	for {
+		seen := atomic.LoadUint64(&i.liveTailSlot)
+		if currentSlot <= seen || atomic.CompareAndSwapUint64(&i.liveTailSlot, seen, currentSlot) {
+			break
+		}
+	}
 
 	// Log clean block line: slot, hash, nonce (VRF output)
 	vrfHex := ""
