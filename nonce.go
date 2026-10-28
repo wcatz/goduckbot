@@ -549,6 +549,12 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 				log.Printf("TICKN: no second-to-last block for epoch %d, trying Koios for full nonce", etaPhEpoch)
 			}
 			if hashErr == nil && etaPh != "" {
+				if verifyErr := nt.verifyTICKN(ctx, epoch-1); verifyErr != nil {
+					log.Printf("TICKN: not trusted for epoch %d, trying Koios: %v", epoch, verifyErr)
+					etaPh = ""
+				}
+			}
+			if hashErr == nil && etaPh != "" {
 				hashBytes, _ := hex.DecodeString(etaPh)
 				nonce = hashConcat(candidate, hashBytes)
 				log.Printf("Computed epoch %d nonce from candidate(%d) + η_ph(%d): %s",
@@ -576,6 +582,35 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	return nonce, nil
 }
 
+
+// verifyTICKN checks the stored nonce state against an epoch whose nonce is
+// already published: candidate(epoch-1) ⭒ η_ph(epoch-2) must reproduce Koios's
+// nonce for epoch. The block count check on the candidate epoch alone misses a
+// block lost in an earlier epoch, which the evolving nonce carries forward.
+// When Koios is unavailable the check is skipped.
+func (nt *NonceTracker) verifyTICKN(ctx context.Context, epoch int) error {
+	if nt.koiosClient == nil {
+		return nil
+	}
+	known, err := nt.fetchNonceFromKoios(ctx, epoch)
+	if err != nil {
+		log.Printf("TICKN: cannot verify against epoch %d nonce: %v", epoch, err)
+		return nil
+	}
+	candidate, err := nt.store.GetCandidateNonce(ctx, epoch-1)
+	if err != nil || candidate == nil {
+		return fmt.Errorf("no candidate nonce for epoch %d", epoch-1)
+	}
+	etaPh, err := nt.store.GetPrevHashOfLastBlock(ctx, epoch-2)
+	if err != nil || etaPh == "" {
+		return fmt.Errorf("no η_ph for epoch %d", epoch-2)
+	}
+	hashBytes, _ := hex.DecodeString(etaPh)
+	if got := hashConcat(candidate, hashBytes); !bytes.Equal(got, known) {
+		return fmt.Errorf("stored state gives epoch %d nonce %x, Koios has %x", epoch, got, known)
+	}
+	return nil
+}
 
 // ComputeEpochNonce computes the epoch nonce for targetEpoch entirely from local chain data.
 // Streams all blocks from Shelley genesis, evolving the nonce and freezing at the
