@@ -1,10 +1,10 @@
 module duckBot
 
-go 1.26.8
+go 1.26.10
 
 require (
-	github.com/blinklabs-io/adder v0.45.0
-	github.com/blinklabs-io/gouroboros v0.205.0
+	github.com/blinklabs-io/adder v0.46.0
+	github.com/blinklabs-io/gouroboros v0.216.2
 	github.com/cardano-community/koios-go-client/v3 v3.1.3
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/gorilla/websocket v1.5.3
@@ -23,13 +23,13 @@ require (
 	github.com/SundaeSwap-finance/ogmigo/v6 v6.2.1 // indirect
 	github.com/aws/aws-sdk-go v1.55.8 // indirect
 	github.com/bits-and-blooms/bitset v1.25.0 // indirect
-	github.com/blinklabs-io/plutigo v0.9.1 // indirect
-	github.com/btcsuite/btcd/btcec/v2 v2.5.0 // indirect
+	github.com/blinklabs-io/plutigo v0.10.0 // indirect
+	github.com/btcsuite/btcd/btcec/v2 v2.5.1 // indirect
 	github.com/btcsuite/btcd/btcutil v1.2.0 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0 // indirect
 	github.com/btcsuite/btcd/chainhash/v2 v2.0.0 // indirect
 	github.com/btcsuite/btcutil v1.0.2 // indirect
-	github.com/buger/jsonparser v1.2.0 // indirect
+	github.com/buger/jsonparser v1.6.1 // indirect
 	github.com/consensys/gnark-crypto v0.22.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
@@ -44,7 +44,7 @@ require (
 	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/kelseyhightower/envconfig v1.4.0 // indirect
-	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/minio/sha256-simd v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
