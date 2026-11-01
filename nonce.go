@@ -549,6 +549,12 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 				log.Printf("TICKN: no second-to-last block for epoch %d, trying Koios for full nonce", etaPhEpoch)
 			}
 			if hashErr == nil && etaPh != "" {
+				if verifyErr := nt.verifyTICKN(ctx, epoch-1); verifyErr != nil {
+					log.Printf("TICKN: not trusted for epoch %d, trying Koios: %v", epoch, verifyErr)
+					etaPh = ""
+				}
+			}
+			if hashErr == nil && etaPh != "" {
 				hashBytes, _ := hex.DecodeString(etaPh)
 				nonce = hashConcat(candidate, hashBytes)
 				log.Printf("Computed epoch %d nonce from candidate(%d) + η_ph(%d): %s",
@@ -576,6 +582,35 @@ func (nt *NonceTracker) GetNonceForEpoch(epoch int) ([]byte, error) {
 	return nonce, nil
 }
 
+
+// verifyTICKN checks the stored nonce state against an epoch whose nonce is
+// already published: candidate(epoch-1) ⭒ η_ph(epoch-2) must reproduce Koios's
+// nonce for epoch. The block count check on the candidate epoch alone misses a
+// block lost in an earlier epoch, which the evolving nonce carries forward.
+// When Koios is unavailable the check is skipped.
+func (nt *NonceTracker) verifyTICKN(ctx context.Context, epoch int) error {
+	if nt.koiosClient == nil {
+		return nil
+	}
+	known, err := nt.fetchNonceFromKoios(ctx, epoch)
+	if err != nil {
+		log.Printf("TICKN: cannot verify against epoch %d nonce: %v", epoch, err)
+		return nil
+	}
+	candidate, err := nt.store.GetCandidateNonce(ctx, epoch-1)
+	if err != nil || candidate == nil {
+		return fmt.Errorf("no candidate nonce for epoch %d", epoch-1)
+	}
+	etaPh, err := nt.store.GetPrevHashOfLastBlock(ctx, epoch-2)
+	if err != nil || etaPh == "" {
+		return fmt.Errorf("no η_ph for epoch %d", epoch-2)
+	}
+	hashBytes, _ := hex.DecodeString(etaPh)
+	if got := hashConcat(candidate, hashBytes); !bytes.Equal(got, known) {
+		return fmt.Errorf("stored state gives epoch %d nonce %x, Koios has %x", epoch, got, known)
+	}
+	return nil
+}
 
 // ComputeEpochNonce computes the epoch nonce for targetEpoch entirely from local chain data.
 // Streams all blocks from Shelley genesis, evolving the nonce and freezing at the
@@ -719,6 +754,7 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 	var lastEpochBlockNonce []byte // nil = NeutralNonce
 
 	currentEpoch := shelleyStart
+	epochBlocks := 0
 	candidateFrozen := false
 	cached := 0
 	skipped := 0
@@ -806,7 +842,16 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 				skipped++
 			}
 
+			// Persist the outgoing epoch's evolving nonce, so the live tracker
+			// and restoreEpochFromDB continue from the backfilled chain state.
+			if epochBlocks > 0 {
+				if storeErr := nt.store.UpsertEvolvingNonce(ctx, currentEpoch, etaV, epochBlocks); storeErr != nil {
+					log.Printf("Backfill: failed to store evolving nonce for epoch %d: %v", currentEpoch, storeErr)
+				}
+			}
+
 			currentEpoch = epoch
+			epochBlocks = 0
 			candidateFrozen = false
 		}
 
@@ -832,10 +877,18 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 		// Recompute era-aware nonce from raw VRF output (don't trust stored nonce_value)
 		nonceValue := vrfNonceValueForEpoch(vrfOutput, epoch, nt.networkMagic)
 		etaV = evolveNonce(etaV, nonceValue)
+		epochBlocks++
 		prevBlockHash = blockHash
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("row iteration: %w", err)
+	}
+	rows.Close()
+
+	if epochBlocks > 0 {
+		if err := nt.reseedFromBackfill(ctx, currentEpoch); err != nil {
+			return fmt.Errorf("reseeding nonce tracker: %w", err)
+		}
 	}
 
 	log.Printf("Nonce backfill complete in %v: %d cached, %d skipped (already present)",
@@ -858,6 +911,59 @@ func (nt *NonceTracker) BackfillNonces(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// reseedFromBackfill rebuilds the live tracker from the evolving nonces the
+// backfill persisted, from the last streamed epoch through the tracker's
+// current epoch. The tracker may have started from a seed the chain never
+// produced (a restart whose DB held no evolving nonce for the tip epoch), and
+// would otherwise freeze the next candidate nonce from it. A next-epoch nonce
+// already computed from the old candidate is recomputed.
+func (nt *NonceTracker) reseedFromBackfill(ctx context.Context, lastEpoch int) error {
+	nt.mu.Lock()
+	defer nt.mu.Unlock()
+	through := max(nt.currentEpoch, lastEpoch)
+	for epoch := lastEpoch; epoch <= through; epoch++ {
+		if err := nt.restoreEpochFromDB(ctx, epoch); err != nil {
+			return err
+		}
+	}
+	log.Printf("Backfill: reseeded nonce tracker from epoch %d through %d", lastEpoch, through)
+	nt.correctNextEpochNonce(ctx, through)
+	return nil
+}
+
+// correctNextEpochNonce replaces a cached nonce for epoch+1 that differs from
+// the one candidate(epoch) and η_ph(epoch-1) give by the TICKN rule of
+// GetNonceForEpoch. The leaderlog trigger sees the change and posts a
+// corrected schedule. Callers hold nt.mu.
+func (nt *NonceTracker) correctNextEpochNonce(ctx context.Context, epoch int) {
+	cached, err := nt.store.GetFinalNonce(ctx, epoch+1)
+	if err != nil || cached == nil {
+		return
+	}
+	candidate, err := nt.store.GetCandidateNonce(ctx, epoch)
+	if err != nil || candidate == nil {
+		return
+	}
+	etaPh, err := nt.store.GetPrevHashOfLastBlock(ctx, epoch-1)
+	if err != nil || etaPh == "" {
+		return
+	}
+	if err := nt.verifyTICKN(ctx, epoch); err != nil {
+		log.Printf("Backfill: not correcting epoch %d nonce: %v", epoch+1, err)
+		return
+	}
+	hashBytes, _ := hex.DecodeString(etaPh)
+	nonce := hashConcat(candidate, hashBytes)
+	if bytes.Equal(nonce, cached) {
+		return
+	}
+	if err := nt.store.SetFinalNonce(ctx, epoch+1, nonce, "computed"); err != nil {
+		log.Printf("Backfill: failed to correct epoch %d nonce: %v", epoch+1, err)
+		return
+	}
+	log.Printf("Backfill: corrected epoch %d nonce %x -> %x", epoch+1, cached, nonce)
 }
 
 // IntegrityReport is the summary of a full nonce integrity check.

@@ -86,16 +86,14 @@ func (s *ChainSyncer) Start(ctx context.Context) error {
 	)
 
 	// Connect to node via NtN (required for TCP connections)
-	// Keepalive DISABLED during historical sync: enabling keepalive causes
-	// ChainSync to stall after ~2000 blocks (gouroboros muxer interaction),
-	// dropping throughput from ~2500 blk/s to ~6 blk/s.
-	// Without keepalive the node kills us every ~97s (ExceededTimeLimit),
-	// but the retry loop handles reconnects seamlessly at ~1800 blk/s sustained.
+	// Keepalive enabled: the node drops NtN peers that never answer its
+	// keep-alive (ExceededTimeLimit). gouroboros v0.208.4+ queues ingress
+	// per protocol, so the ChainSync backlog no longer starves keep-alive.
 	errChan := make(chan error, 1)
 	conn, connErr := ouroboros.NewConnection(
 		ouroboros.WithNetworkMagic(uint32(s.networkMagic)),
 		ouroboros.WithNodeToNode(true),
-		ouroboros.WithKeepAlive(false),
+		ouroboros.WithKeepAlive(true),
 		ouroboros.WithChainSyncConfig(chainSyncCfg),
 		ouroboros.WithErrorChan(errChan),
 	)
