@@ -721,6 +721,11 @@ func (i *Indexer) runChainTail() error {
 				log.Printf("Nonce backfill failed: %v", err)
 				return
 			}
+			// The backfill may have corrected the next epoch's nonce; make the
+			// leaderlog trigger compare stored schedules against it again.
+			i.leaderlogMu.Lock()
+			clear(i.scheduleExists)
+			i.leaderlogMu.Unlock()
 
 			if viper.GetBool("leaderlog.nonceIntegrityCheck") {
 				report, err := i.nonceTracker.NonceIntegrityCheck(ctx)
