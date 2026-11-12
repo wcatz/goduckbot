@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -176,5 +179,68 @@ func TestAdastatBlockURL(t *testing.T) {
 func TestNodeImplementation(t *testing.T) {
 	if nodeImplementation(69) != "Dingo" || nodeImplementation(0) != "Haskell" {
 		t.Error("wrong node implementation mapping")
+	}
+}
+
+func TestCountNodeBlockUnknownUntilLoaded(t *testing.T) {
+	i := &Indexer{totalBlocks: 100}
+	if _, ok := i.countNodeBlock(dingoProtoMinor); ok {
+		t.Fatal("count reported before Dingo blocks were loaded")
+	}
+	if err := i.loadDingoBlocks(context.Background(), func(context.Context) (uint64, error) { return 40, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := i.countNodeBlock(dingoProtoMinor); !ok || n != 41 {
+		t.Errorf("dingo: got %d, %v; want 41, true", n, ok)
+	}
+	if n, ok := i.countNodeBlock(0); !ok || n != 59 {
+		t.Errorf("haskell: got %d, %v; want 59, true", n, ok)
+	}
+}
+
+func TestRetryDingoBlocksRecovers(t *testing.T) {
+	i := &Indexer{totalBlocks: 100}
+	var calls atomic.Int32
+	fetch := func(context.Context) (uint64, error) {
+		if calls.Add(1) < 3 {
+			return 0, errors.New("context deadline exceeded")
+		}
+		return 81, nil
+	}
+	done := make(chan struct{})
+	go func() {
+		i.retryDingoBlocks(context.Background(), fetch, time.Millisecond, 4*time.Millisecond)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry did not finish")
+	}
+	if calls.Load() != 3 {
+		t.Errorf("fetch calls = %d, want 3", calls.Load())
+	}
+	if n, ok := i.countNodeBlock(dingoProtoMinor); !ok || n != 82 {
+		t.Errorf("got %d, %v; want 82, true", n, ok)
+	}
+}
+
+func TestRetryDingoBlocksStopsOnCancel(t *testing.T) {
+	i := &Indexer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		i.retryDingoBlocks(ctx, func(context.Context) (uint64, error) { return 0, errors.New("down") }, time.Millisecond, time.Millisecond)
+		close(done)
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry did not stop after cancel")
+	}
+	if _, ok := i.countNodeBlock(dingoProtoMinor); ok {
+		t.Error("count enabled without a successful fetch")
 	}
 }
