@@ -132,6 +132,7 @@ type Indexer struct {
 	totalBlocks     uint64
 	dingoBlocks     uint64 // lifetime blocks forged by Dingo (header proto minor 69)
 	nodeBlocksKnown bool   // dingoBlocks was seeded from Koios
+	nodeBlocksMu    sync.Mutex // guards dingoBlocks and nodeBlocksKnown
 	poolName        string
 	epoch           int
 	networkMagic    int
@@ -493,14 +494,12 @@ func (i *Indexer) Start() error {
 	} else if lifetimeBlocks.Data != nil {
 		i.totalBlocks = lifetimeBlocks.Data.BlockCount
 		// Lifetime blocks per node implementation (Dingo vs Haskell)
-		dingoCtx, dingoCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		dingoBlocks, err := fetchPoolBlockCountByProtoMinor(dingoCtx, koiosRESTBase(i.networkMagic), i.bech32PoolId, dingoProtoMinor)
-		dingoCancel()
-		if err != nil {
-			log.Printf("warning: failed to get pool Dingo block count: %s (node counts disabled)", err)
-		} else {
-			i.dingoBlocks = dingoBlocks
-			i.nodeBlocksKnown = true
+		fetchDingo := func(ctx context.Context) (uint64, error) {
+			return fetchPoolBlockCountByProtoMinor(ctx, koiosRESTBase(i.networkMagic), i.bech32PoolId, dingoProtoMinor)
+		}
+		if err := i.loadDingoBlocks(context.Background(), fetchDingo); err != nil {
+			log.Printf("warning: failed to get pool Dingo block count: %s (retrying in background)", err)
+			go i.retryDingoBlocks(context.Background(), fetchDingo, time.Minute, 15*time.Minute)
 		}
 	}
 
@@ -513,8 +512,11 @@ func (i *Indexer) Start() error {
 		i.epochBlocks = len(epochBlocks.Data)
 	}
 	log.Println("quack(duckBot initialized)")
+	i.nodeBlocksMu.Lock()
+	startDingo := i.dingoBlocks
+	i.nodeBlocksMu.Unlock()
 	log.Printf("duckBot started: %s | Epoch: %d | Epoch Blocks: %d | Lifetime Blocks: %d (Dingo %d) | Mode: %s",
-		i.poolName, i.epoch, i.epochBlocks, i.totalBlocks, i.dingoBlocks, i.mode)
+		i.poolName, i.epoch, i.epochBlocks, i.totalBlocks, startDingo, i.mode)
 
 	// Register bot commands and start polling
 	if i.telegramEnabled && i.bot != nil && len(i.allowedUsers) > 0 {
@@ -1169,12 +1171,8 @@ func (i *Indexer) handleEvent(evt event.Event) error {
 					notif.MaxSteps, notif.MaxMem = i.getMaxBlockExUnits(blockEpoch)
 				}
 				notif.ProtoMinor, notif.HasProto = headerProtoMinor(ledgerBlock.Header())
-				if notif.HasProto && i.nodeBlocksKnown {
-					if notif.ProtoMinor == dingoProtoMinor {
-						i.dingoBlocks++
-					}
-					notif.HasNodeBlocks = true
-					notif.NodeBlocks = nodeBlockCount(notif.ProtoMinor, i.totalBlocks, i.dingoBlocks)
+				if notif.HasProto {
+					notif.NodeBlocks, notif.HasNodeBlocks = i.countNodeBlock(notif.ProtoMinor)
 				}
 			}
 			tgNotif := notif

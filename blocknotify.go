@@ -108,6 +108,63 @@ func nodeBlockCount(protoMinor, totalBlocks, dingoBlocks uint64) uint64 {
 	return totalBlocks - dingoBlocks
 }
 
+// loadDingoBlocks seeds the lifetime Dingo block count from Koios. On success
+// it enables per-node counts in mint notifications.
+func (i *Indexer) loadDingoBlocks(parent context.Context, fetch func(context.Context) (uint64, error)) error {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	n, err := fetch(ctx)
+	if err != nil {
+		return err
+	}
+	i.nodeBlocksMu.Lock()
+	i.dingoBlocks = n
+	i.nodeBlocksKnown = true
+	i.nodeBlocksMu.Unlock()
+	return nil
+}
+
+// retryDingoBlocks keeps retrying loadDingoBlocks with exponential backoff
+// (from initial, capped at max) until it succeeds or ctx is done, so one slow
+// Koios call at startup does not disable node counts until the next restart.
+// We see our own blocks before Koios indexes them, so a count fetched late
+// cannot include a block the live tail has not handled yet.
+func (i *Indexer) retryDingoBlocks(ctx context.Context, fetch func(context.Context) (uint64, error), initial, max time.Duration) {
+	delay := initial
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if err := i.loadDingoBlocks(ctx, fetch); err != nil {
+			log.Printf("warning: retry of pool Dingo block count failed: %s (next in %s)", err, min(delay*2, max))
+			delay = min(delay*2, max)
+			continue
+		}
+		i.nodeBlocksMu.Lock()
+		n := i.dingoBlocks
+		i.nodeBlocksMu.Unlock()
+		log.Printf("pool Dingo block count loaded on retry: %d (node counts enabled)", n)
+		return
+	}
+}
+
+// countNodeBlock records a newly minted block with the given header protocol
+// minor and returns the lifetime count for its node implementation. ok is
+// false while the Dingo count has not been loaded from Koios yet.
+func (i *Indexer) countNodeBlock(protoMinor uint64) (count uint64, ok bool) {
+	i.nodeBlocksMu.Lock()
+	defer i.nodeBlocksMu.Unlock()
+	if !i.nodeBlocksKnown {
+		return 0, false
+	}
+	if protoMinor == dingoProtoMinor {
+		i.dingoBlocks++
+	}
+	return nodeBlockCount(protoMinor, i.totalBlocks, i.dingoBlocks), true
+}
+
 // fetchPoolBlockCountByProtoMinor returns how many blocks a pool has forged
 // with the given header protocol minor version, using Koios' exact row count
 // (Content-Range) so only one row is transferred.
